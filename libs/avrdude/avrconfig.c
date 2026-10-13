@@ -108,3 +108,14 @@ TOKEN * string(char * text)
 
   return tkn;
 }
+
+/* single definitions (previously tentative definitions in the header) */
+AVRPART    * current_part;
+PROGRAMMER * current_prog;
+char default_parallel[4096];
+char default_programmer[MAX_STR_CONST];
+char default_serial[4096];
+const char * infile;
+int    lineno;
+char string_buf[MAX_STR_CONST];
+char *string_buf_ptr;

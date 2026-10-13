@@ -298,3 +298,6 @@ void init(void) {
 	quiggGT7000Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *quigg_gt7000;

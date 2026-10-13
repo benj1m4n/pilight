@@ -191,6 +191,17 @@ void mqtt_free(struct mqtt_pkt_t *pkt) {
 				FREE(pkt->payload.subscribe.topic);
 			}
 		} break;
+		case MQTT_UNSUBSCRIBE: {
+			int i = 0;
+			for(i=0;i<pkt->payload.unsubscribe.nrtopics;i++) {
+				if(pkt->payload.unsubscribe.topics[i] != NULL) {
+					FREE(pkt->payload.unsubscribe.topics[i]);
+				}
+			}
+			if(pkt->payload.unsubscribe.topics != NULL) {
+				FREE(pkt->payload.unsubscribe.topics);
+			}
+		} break;
 	}
 }
 
@@ -460,6 +471,7 @@ int mqtt_decode(struct mqtt_pkt_t **pkt, unsigned char *buf, unsigned int len, u
 	}
 	memset((*pkt), 0, sizeof(struct mqtt_pkt_t));
 
+	unsigned int hdrpos = (*pos);
 	(*pkt)->type = (buf[(*pos)] & 0xF0) >> 4;
 	if((*pkt)->type == MQTT_PUBLISH ||
 		 (*pkt)->type == MQTT_PUBCOMP ||
@@ -469,6 +481,8 @@ int mqtt_decode(struct mqtt_pkt_t **pkt, unsigned char *buf, unsigned int len, u
 		(*pkt)->retain = (buf[(*pos)++] & 0x01);
 	}
 	if((*pkt)->type == MQTT_SUBSCRIBE ||
+		 (*pkt)->type == MQTT_UNSUBSCRIBE ||
+		 (*pkt)->type == MQTT_UNSUBACK ||
 		 (*pkt)->type == MQTT_CONNECT ||
 		 (*pkt)->type == MQTT_CONNACK ||
 		 (*pkt)->type == MQTT_PUBACK ||
@@ -480,8 +494,20 @@ int mqtt_decode(struct mqtt_pkt_t **pkt, unsigned char *buf, unsigned int len, u
 		(*pkt)->reserved = buf[(*pos)++] & 0x0F;
 	}
 
-	unsigned int multiplier = 1, msglength = 0;
+	if((*pos) == hdrpos) {
+		/* fixed header byte of any other packet type */
+		(*pos)++;
+	}
+
+	unsigned int multiplier = 1, msglength = 0, nlen = 0;
 	do {
+		if((*pos) >= len || nlen++ >= 4) {
+			/* remaining length not complete (yet) */
+			mqtt_free((*pkt));
+			FREE((*pkt));
+			(*pos) = hdrpos;
+			return (nlen > 4) ? -1 : 1;
+		}
 		msglength += (buf[(*pos)] & 0x7F) * multiplier;
 		multiplier *= 128;
 	} while(buf[(*pos)++] >= 128);
@@ -521,14 +547,14 @@ int mqtt_decode(struct mqtt_pkt_t **pkt, unsigned char *buf, unsigned int len, u
 			(*pkt)->payload.connect.keepalive = buf[(*pos)] << 8 | buf[(*pos)+1]; (*pos)+=2;
 
 			{
-				length = (buf[(*pos)]) | buf[(*pos)+1]; (*pos)+=2;
+				length = (buf[(*pos)] << 8) | buf[(*pos)+1]; (*pos)+=2;
 				read_value(&buf[(*pos)], length, &(*pkt)->payload.connect.clientid);
 				(*pos)+=length;
 			}
 
 			{
 				if((*pkt)->header.connect.willflag == 1) {
-					length = (buf[(*pos)]) | buf[(*pos)+1]; (*pos)+=2;
+					length = (buf[(*pos)] << 8) | buf[(*pos)+1]; (*pos)+=2;
 					if((int)length < 0) {
 						logprintf(LOG_ERR, "received incomplete message");
 						mqtt_free((*pkt));
@@ -542,7 +568,7 @@ int mqtt_decode(struct mqtt_pkt_t **pkt, unsigned char *buf, unsigned int len, u
 
 			{
 				if((*pkt)->header.connect.willflag == 1) {
-					length = (buf[(*pos)]) | buf[(*pos)+1]; (*pos)+=2;
+					length = (buf[(*pos)] << 8) | buf[(*pos)+1]; (*pos)+=2;
 					if((int)length < 0) {
 						logprintf(LOG_ERR, "received incomplete message");
 						mqtt_free((*pkt));
@@ -556,7 +582,7 @@ int mqtt_decode(struct mqtt_pkt_t **pkt, unsigned char *buf, unsigned int len, u
 
 			{
 				if((*pkt)->header.connect.username == 1) {
-					length = (buf[(*pos)]) | buf[(*pos)+1]; (*pos)+=2;
+					length = (buf[(*pos)] << 8) | buf[(*pos)+1]; (*pos)+=2;
 					if((int)length < 0) {
 						logprintf(LOG_ERR, "received incomplete message");
 						mqtt_free((*pkt));
@@ -570,7 +596,7 @@ int mqtt_decode(struct mqtt_pkt_t **pkt, unsigned char *buf, unsigned int len, u
 
 			{
 				if((*pkt)->header.connect.password == 1) {
-					length = (buf[(*pos)]) | buf[(*pos)+1]; (*pos)+=2;
+					length = (buf[(*pos)] << 8) | buf[(*pos)+1]; (*pos)+=2;
 					if((int)length < 0) {
 						logprintf(LOG_ERR, "received incomplete message");
 						mqtt_free((*pkt));
@@ -589,7 +615,7 @@ int mqtt_decode(struct mqtt_pkt_t **pkt, unsigned char *buf, unsigned int len, u
 		} break;
 		case MQTT_PUBLISH: {
 			{
-				length = (buf[(*pos)]) | buf[(*pos)+1]; (*pos)+=2;
+				length = (buf[(*pos)] << 8) | buf[(*pos)+1]; (*pos)+=2;
 				if((int)length < 0) {
 					logprintf(LOG_ERR, "received incomplete message");
 					mqtt_free((*pkt));
@@ -629,10 +655,10 @@ int mqtt_decode(struct mqtt_pkt_t **pkt, unsigned char *buf, unsigned int len, u
 			(*pkt)->payload.pubcomp.msgid = (buf[(*pos)] << 8) | buf[(*pos)+1]; (*pos)+=2;
 		} break;
 		case MQTT_SUBSCRIBE: {
-			(*pkt)->payload.subscribe.msgid = buf[(*pos)] | buf[(*pos)+1]; (*pos)+=2;
+			(*pkt)->payload.subscribe.msgid = (buf[(*pos)] << 8) | buf[(*pos)+1]; (*pos)+=2;
 
 			{
-				length = (buf[(*pos)]) | buf[(*pos)+1]; (*pos)+=2;
+				length = (buf[(*pos)] << 8) | buf[(*pos)+1]; (*pos)+=2;
 				read_value(&buf[(*pos)], length, &(*pkt)->payload.subscribe.topic);
 				(*pos)+=length;
 			}
@@ -640,8 +666,32 @@ int mqtt_decode(struct mqtt_pkt_t **pkt, unsigned char *buf, unsigned int len, u
 			(*pkt)->payload.subscribe.qos = buf[(*pos)++];
 		} break;
 		case MQTT_SUBACK: {
-			(*pkt)->payload.suback.msgid = buf[(*pos)] | buf[(*pos)+1]; (*pos)+=2;
+			(*pkt)->payload.suback.msgid = (buf[(*pos)] << 8) | buf[(*pos)+1]; (*pos)+=2;
 			(*pkt)->payload.suback.qos = buf[(*pos)++];
+		} break;
+		case MQTT_UNSUBSCRIBE: {
+			(*pkt)->payload.unsubscribe.msgid = (buf[(*pos)] << 8) | buf[(*pos)+1]; (*pos)+=2;
+			while((*pos)+2 <= startpos+msglength) {
+				length = (buf[(*pos)] << 8) | buf[(*pos)+1]; (*pos)+=2;
+				if((*pos)+length > startpos+msglength) {
+					break;
+				}
+				int n = (*pkt)->payload.unsubscribe.nrtopics;
+				if(((*pkt)->payload.unsubscribe.topics = REALLOC((*pkt)->payload.unsubscribe.topics, sizeof(char *)*(n+1))) == NULL) {
+					OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
+				}
+				(*pkt)->payload.unsubscribe.topics[n] = NULL;
+				read_value(&buf[(*pos)], length, &(*pkt)->payload.unsubscribe.topics[n]);
+				(*pkt)->payload.unsubscribe.nrtopics++;
+				(*pos)+=length;
+			}
+		} break;
+		case MQTT_UNSUBACK: {
+			(*pos)+=2;
+		} break;
+		default: {
+			/* Unknown packet type: skip its body so the stream stays in sync */
+			(*pos) = startpos+msglength;
 		} break;
 	}
 

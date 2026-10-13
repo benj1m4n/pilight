@@ -271,3 +271,6 @@ void init(void) {
 	tfa30Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *tfa30;

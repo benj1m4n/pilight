@@ -162,3 +162,6 @@ void init(void) {
 	tasmotaSwitchInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *tasmotaSwitch;

@@ -24,7 +24,7 @@ typedef struct firmware_t {
 	double hpf;
 	double version;
 } firmware_t;
-struct firmware_t firmware;
+extern struct firmware_t firmware;
 
 typedef enum {
 	FW_PROG_OP_FAIL = 1,

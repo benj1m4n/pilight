@@ -26,13 +26,13 @@
 #include <mbedtls/cipher.h>
 #include <mbedtls/ssl_cache.h>
 
-mbedtls_entropy_context ssl_entropy;
-mbedtls_ctr_drbg_context ssl_ctr_drbg;
-mbedtls_pk_context ssl_pk_key;
-mbedtls_x509_crt ssl_server_crt;
-mbedtls_ssl_cache_context ssl_cache;
-struct mbedtls_ssl_config ssl_client_conf;
-struct mbedtls_ssl_config ssl_server_conf;
+extern mbedtls_entropy_context ssl_entropy;
+extern mbedtls_ctr_drbg_context ssl_ctr_drbg;
+extern mbedtls_pk_context ssl_pk_key;
+extern mbedtls_x509_crt ssl_server_crt;
+extern mbedtls_ssl_cache_context ssl_cache;
+extern struct mbedtls_ssl_config ssl_client_conf;
+extern struct mbedtls_ssl_config ssl_server_conf;
 
 int ssl_client_init_status(void);
 int ssl_server_init_status(void);

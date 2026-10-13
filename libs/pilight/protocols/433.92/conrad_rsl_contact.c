@@ -118,3 +118,6 @@ void init(void) {
 	conradRSLContactInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *conrad_rsl_contact;

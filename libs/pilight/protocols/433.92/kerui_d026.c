@@ -112,3 +112,6 @@ void init(void) {
 	keruiD026Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *kerui_D026;

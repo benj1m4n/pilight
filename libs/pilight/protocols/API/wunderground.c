@@ -1071,3 +1071,6 @@ void init(void) {
 	wundergroundInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *wunderground;

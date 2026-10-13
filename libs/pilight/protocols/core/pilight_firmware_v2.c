@@ -109,3 +109,6 @@ void init(void) {
 	pilightFirmwareV2Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *pilight_firmware_v2;

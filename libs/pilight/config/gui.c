@@ -631,3 +631,6 @@ void gui_init(void) {
 	pthread_mutexattr_settype(&mutex_attr, PTHREAD_MUTEX_RECURSIVE);
 	pthread_mutex_init(&mutex_lock, &mutex_attr);
 }
+
+/* single definitions (previously tentative definitions in the header) */
+struct config_t *config_gui;

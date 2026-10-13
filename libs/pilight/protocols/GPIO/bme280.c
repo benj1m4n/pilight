@@ -526,3 +526,6 @@ void init(void) {
 	bme280Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *bme280;

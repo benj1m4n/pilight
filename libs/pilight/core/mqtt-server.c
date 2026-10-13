@@ -624,6 +624,43 @@ static ssize_t client_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 					pthread_mutex_unlock(&mqtt_lock);
 #endif
 				} break;
+				case MQTT_UNSUBSCRIBE: {
+#ifdef _WIN32
+					uv_mutex_lock(&mqtt_lock);
+#else
+					pthread_mutex_lock(&mqtt_lock);
+#endif
+					int i = 0;
+					for(i=0;i<pkt->payload.unsubscribe.nrtopics;i++) {
+						struct mqtt_subscription_t *sub = client->subscriptions, *prev = NULL;
+						while(sub) {
+							if(strcmp(sub->topic, pkt->payload.unsubscribe.topics[i]) == 0) {
+								if(prev == NULL) {
+									client->subscriptions = sub->next;
+								} else {
+									prev->next = sub->next;
+								}
+								FREE(sub->topic);
+								FREE(sub);
+								break;
+							}
+							prev = sub;
+							sub = sub->next;
+						}
+					}
+#ifdef _WIN32
+					uv_mutex_unlock(&mqtt_lock);
+#else
+					pthread_mutex_unlock(&mqtt_lock);
+#endif
+					/* UNSUBACK: fixed header, remaining length 2, packet identifier */
+					unsigned char unsuback[4] = {
+						(MQTT_UNSUBACK << 4), 0x02,
+						(pkt->payload.unsubscribe.msgid >> 8) & 0xFF,
+						pkt->payload.unsubscribe.msgid & 0xFF
+					};
+					iobuf_append(&custom_poll_data->send_iobuf, (void *)unsuback, 4);
+				} break;
 				case MQTT_PINGREQ: {
 					mqtt_pingresp(client);
 				} break;

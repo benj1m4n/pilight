@@ -460,3 +460,6 @@ void init(void) {
 	bmp180Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *bmp180;

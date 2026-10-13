@@ -94,6 +94,11 @@ typedef struct mqtt_pkt_t {
 			uint16_t msgid;
 			uint8_t qos;
 		} suback;
+		struct {
+			uint16_t msgid;
+			char **topics;
+			int nrtopics;
+		} unsubscribe;
 	} payload;
 } mqtt_pkt_t;
 

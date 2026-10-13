@@ -123,3 +123,6 @@ char *sha256cache_get_hash(char *name) {
 	}
 	return NULL;
 }
+
+/* single definitions (previously tentative definitions in the header) */
+struct sha256cache_t *sha256cache;

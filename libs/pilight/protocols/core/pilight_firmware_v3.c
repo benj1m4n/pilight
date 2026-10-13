@@ -126,3 +126,6 @@ void init(void) {
 	pilightFirmwareV3Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *pilight_firmware_v3;

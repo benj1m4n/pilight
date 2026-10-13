@@ -20,7 +20,7 @@ typedef struct ntp_servers_t {
 	void (*callback)(int, time_t);
 } ntp_servers_t;
 
-struct ntp_servers_t ntp_servers;
+extern struct ntp_servers_t ntp_servers;
 
 void ntpsync(void);
 void ntp_gc(void);

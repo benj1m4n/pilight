@@ -622,14 +622,16 @@ static int plua_wiringx_isr(struct lua_State *L) {
 		if(gpio >= 0) {
 			struct lua_wiringx_gpio_t *tmp = plua_wiringx_get_gpio_struct(wiringx, gpio);
 
-			if(wiringXISR(gpio, mode) < 0) {
+			int fd = -1;
+			if(wiringXISR(gpio, mode) < 0 || (fd = wiringXSelectableFd(gpio)) < 0) {
 				/*
-				 * FIXME
+				 * Without a valid file descriptor uv_poll_start() crashes
+				 * the daemon (e.g. when the sysfs GPIO export fails).
 				 */
-				// log
+				logprintf(LOG_ERR, "wiringX: could not set up interrupt on GPIO %d, receiving is disabled", gpio);
+				assert(plua_check_stack(L, 0) == 0);
+				return 0;
 			}
-
-			int fd = wiringXSelectableFd(gpio);
 
 			if(tmp->timer_req != NULL) {
 				uv_timer_stop(tmp->timer_req);

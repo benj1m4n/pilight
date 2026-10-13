@@ -209,6 +209,22 @@ int main(int argc, char **argv) {
 		help = 1;
 	}
 
+	/*
+	 * The second options_parse() reallocates the stored option strings,
+	 * so pointers obtained before are stale. Fetch them again.
+	 */
+	server = NULL;
+	uuid = NULL;
+	if(options_exists(options, "p") == 0) {
+		options_get_string(options, "p", &protobuffer);
+	}
+	if(options_exists(options, "S") == 0) {
+		options_get_string(options, "S", &server);
+	}
+	if(options_exists(options, "U") == 0) {
+		options_get_string(options, "U", &uuid);
+	}
+
 	/* Display help or version information */
 	if(version == 1) {
 		printf("%s v%s\n", progname, PILIGHT_VERSION);
@@ -350,6 +366,8 @@ int main(int argc, char **argv) {
 			json_append_member(code, "uuid", json_mkstring(uuid));
 		}
 		json_append_member(json, "code", code);
+		/* code is now owned by json and freed together with it */
+		code = NULL;
 		char *output = json_stringify(json, NULL);
 		socket_write(sockfd, output);
 		json_free(output);

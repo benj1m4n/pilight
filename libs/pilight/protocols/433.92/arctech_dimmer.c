@@ -361,3 +361,6 @@ void init(void) {
 	arctechDimmerInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *arctech_dimmer;

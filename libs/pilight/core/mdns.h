@@ -15,12 +15,12 @@
 struct mdns_cache_t {
 	char *suffix;
 	int pos;
-} mdns_cache_t;
+};
 
 struct mdns_text_t {
 	char **values;
 	int nrvalues;
-} mdns_text_t;
+};
 
 struct mdns_payload_t {
 	char *name;
@@ -38,14 +38,14 @@ struct mdns_payload_t {
 		uint8_t ip6[6];
 		struct mdns_text_t text;
 	} data;
-} mdns_payload_t;
+};
 
 struct mdns_query_t {
 	char *name;
 	uint8_t qu;
 	uint8_t class;
 	uint8_t type;
-} mdns_query_t;
+};
 
 struct mdns_packet_t {
 	uint16_t id;
@@ -76,7 +76,7 @@ struct mdns_packet_t {
 	uint16_t nrcache;
 	struct mdns_cache_t **cache;
 
-} mdns_packet_t;
+};
 
 
 int mdns_decode(struct mdns_packet_t *mdns, unsigned char *message, unsigned int msglen);

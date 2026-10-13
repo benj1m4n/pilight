@@ -248,3 +248,6 @@ void init(void) {
 	tfa2017Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *tfa2017;

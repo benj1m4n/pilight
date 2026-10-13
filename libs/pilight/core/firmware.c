@@ -1264,3 +1264,6 @@ int firmware_update(char *fwfile, char *port) {
 		return ret;
 	}
 }
+
+/* single definitions (previously tentative definitions in the header) */
+struct firmware_t firmware;

@@ -2500,7 +2500,7 @@ int main_gc(void) {
 #ifndef _WIN32
 	if(running == 0) {
 		/* Remove the stale pid file */
-		if(access(pid_file, F_OK) != -1) {
+		if(pid_file != NULL && access(pid_file, F_OK) != -1) {
 			if(remove(pid_file) != -1) {
 				logprintf(LOG_INFO, "removed stale pid_file %s", pid_file);
 			} else {

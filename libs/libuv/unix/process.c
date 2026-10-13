@@ -19,6 +19,10 @@
  * IN THE SOFTWARE.
  */
 
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+# define _GNU_SOURCE /* accept4, dup3, pipe2 */
+#endif
+
 #include "uv.h"
 #include "internal.h"
 

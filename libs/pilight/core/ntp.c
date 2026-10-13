@@ -374,3 +374,6 @@ int getntpdiff(void) {
 int isntpsynced(void) {
 	return synced;
 }
+
+/* single definitions (previously tentative definitions in the header) */
+struct ntp_servers_t ntp_servers;

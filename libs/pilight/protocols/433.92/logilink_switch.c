@@ -241,3 +241,6 @@ void init(void) {
 	logilinkSwitchInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *logilink_switch;

@@ -32,7 +32,7 @@
 enum eventpool_threads_t {
 	EVENTPOOL_NO_THREADS,
 	EVENTPOOL_THREADED
-} eventpool_threads_t;
+};
 
 #define EVENTPOOL_STAGE_SOCKET 						0
 #define EVENTPOOL_STAGE_CONNECT 					1
@@ -183,7 +183,7 @@ struct uv_custom_poll_t {
 
   struct iobuf_t recv_iobuf;
   struct iobuf_t send_iobuf;
-} uv_custom_poll_t;
+};
 
 void eventpool_callback_remove(struct eventpool_listener_t *node);
 void *eventpool_callback(int, void *(*)(int, void *, void *), void *);

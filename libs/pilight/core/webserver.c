@@ -1414,6 +1414,14 @@ int http_parse_request(const char *buffer, ssize_t *pos, struct connection_t *c)
 	c->uri = skip((char *)&buffer[*pos], pos, " ");
 	c->http_version = skip((char *)&buffer[*pos], pos, "\r\n");
 
+	/*
+	 * A malformed request line (e.g. a bare "\r\n") leaves one of
+	 * these NULL. Previously this crashed the daemon in strcmp().
+	 */
+	if(c->request_method == NULL || c->uri == NULL || c->http_version == NULL) {
+		return -1;
+	}
+
 	is_request = is_valid_http_method(c->request_method);
 	if((is_request && memcmp(c->http_version, "HTTP/", 5) != 0) ||
 		(!is_request && memcmp(c->request_method, "HTTP/", 5) != 0)) {
@@ -1808,7 +1816,10 @@ static ssize_t client_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 	ssize_t pos = 0;
 	if(nread > 0) {
 		if(c->is_websocket == 0) {
-			http_parse_request(buf, &pos, c);
+			if(http_parse_request(buf, &pos, c) == -1) {
+				uv_custom_close(req);
+				return nread;
+			}
 			send_websocket_handshake_if_requested(req);
 
 			if(auth_handler(req) == MG_FALSE) {

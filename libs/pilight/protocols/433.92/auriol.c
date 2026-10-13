@@ -202,3 +202,6 @@ void init(void) {
 	auriolInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *auriol;

@@ -116,3 +116,6 @@ void init(void) {
 	iwds07Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *iwds07;

@@ -365,3 +365,6 @@ void init(void) {
 	elro300SwitchInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *elro_300_switch;

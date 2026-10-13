@@ -399,3 +399,6 @@ void init(void) {
 	quiggGT9000Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *quigg_gt9000;

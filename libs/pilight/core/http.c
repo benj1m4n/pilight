@@ -595,6 +595,7 @@ static ssize_t read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 			struct connection_t c;
 			char *location = NULL;
 			ssize_t foo = 0;
+			memset(&c, 0, sizeof(struct connection_t));
 			http_parse_request(header, &foo, &c);
 			if(c.status_code == 301 && (location = (char *)http_get_header(&c, "Location")) != NULL) {
 				uv_timer_stop(request->timer_req);

@@ -9,6 +9,9 @@
 #ifndef _MEM_H_
 #define _MEM_H_
 
+#include <stdio.h>
+#include <stdlib.h>
+
 #include "../backtrace/backtrace.h"
 #include "../backtrace/backtrace-supported.h"
 

@@ -206,3 +206,6 @@ void init(void) {
 	selectremoteInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *selectremote;

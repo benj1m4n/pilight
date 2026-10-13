@@ -265,3 +265,6 @@ void init(void) {
 	smartwaresSwitchInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *smartwares_switch;

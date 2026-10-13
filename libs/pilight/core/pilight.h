@@ -86,13 +86,13 @@ typedef enum origin_t {
 #include <mbedtls/ssl.h>
 #include <mbedtls/ssl_cache.h>
 
-mbedtls_entropy_context ssl_entropy;
-mbedtls_ctr_drbg_context ssl_ctr_drbg;
-mbedtls_pk_context ssl_pk_key;
-mbedtls_x509_crt ssl_server_crt;
-mbedtls_ssl_cache_context ssl_cache;
-struct mbedtls_ssl_config ssl_client_conf;
-struct mbedtls_ssl_config ssl_server_conf;
+extern mbedtls_entropy_context ssl_entropy;
+extern mbedtls_ctr_drbg_context ssl_ctr_drbg;
+extern mbedtls_pk_context ssl_pk_key;
+extern mbedtls_x509_crt ssl_server_crt;
+extern mbedtls_ssl_cache_context ssl_cache;
+extern struct mbedtls_ssl_config ssl_client_conf;
+extern struct mbedtls_ssl_config ssl_server_conf;
 
 struct pilight_t {
 	// void (*broadcast)(char *name, struct JsonNode *message, enum origin_t origin);
@@ -113,10 +113,10 @@ struct pilight_t {
 	int running;
 	int debuglevel;
 	process_t process;
-} pilight_t;
+};
 
 extern struct pilight_t pilight;
-extern const uv_thread_t pth_main_id;
+extern uv_thread_t pth_main_id;
 extern char pilight_uuid[UUID_LENGTH];
 
 #endif

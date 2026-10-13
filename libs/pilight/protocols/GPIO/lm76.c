@@ -257,3 +257,6 @@ void init(void) {
 	lm76Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *lm76;

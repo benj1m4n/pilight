@@ -234,3 +234,6 @@ void init(void) {
 	techlicoSwitchInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *techlico_switch;
