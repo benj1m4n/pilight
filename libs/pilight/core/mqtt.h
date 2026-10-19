@@ -36,6 +36,8 @@ typedef struct mqtt_pkt_t {
 	uint8_t qos;
 	uint8_t retain;
 	uint8_t reserved;
+	/* protocol level the packet is (de)coded for: 3 = 3.1, 4 = 3.1.1, 5 = 5.0, 0 = 3.1.1 */
+	uint8_t version;
 
 	union {
 		struct {
@@ -89,22 +91,36 @@ typedef struct mqtt_pkt_t {
 			char *message;
 			char *topic;
 			uint8_t qos;
+			/* decoded topic filters (a SUBSCRIBE may carry several) */
+			char **topics;
+			uint8_t *options;
+			int nrtopics;
 		} subscribe;
 		struct {
 			uint16_t msgid;
 			uint8_t qos;
+			/* one return/reason code per topic filter (optional) */
+			uint8_t *codes;
+			int nrcodes;
 		} suback;
 		struct {
 			uint16_t msgid;
 			char **topics;
 			int nrtopics;
 		} unsubscribe;
+		struct {
+			uint16_t msgid;
+			uint8_t *codes;
+			int nrcodes;
+		} unsuback;
 	} payload;
 } mqtt_pkt_t;
 
 typedef struct mqtt_subscription_t {
 	char *topic;
 	int qos;
+	/* MQTT 5 "No Local": do not send messages published by this client back to it */
+	int nolocal;
 
 	struct mqtt_subscription_t *next;
 } mqtt_subscription_t;
@@ -133,6 +149,8 @@ typedef struct mqtt_client_t {
 	int haswill;
 	int msgid;
 	int keepalive;
+	/* negotiated protocol level (3, 4 or 5), 0 until CONNECT */
+	int version;
 
 	int step;
 
@@ -180,6 +198,7 @@ enum mqtt_connection_t {
 
 int mqtt_encode(struct mqtt_pkt_t *pkt, unsigned char **buf, unsigned int *len);
 int mqtt_decode(struct mqtt_pkt_t **pkt, unsigned char *buf, unsigned int len, unsigned int *pos);
+int mqtt_decode_version(struct mqtt_pkt_t **pkt, unsigned char *buf, unsigned int len, unsigned int *pos, int version);
 
 int mqtt_pkt_connect(struct mqtt_pkt_t *pkt, int dub, int qos, int retain, char *clientid, char *protocol, int version, char *username, char *password, int willretain, int willflag, int cleansession, int keepalive, char *topic, char *message);
 int mqtt_pkt_connack(struct mqtt_pkt_t *pkt, enum mqtt_connection_t status);
@@ -200,6 +219,8 @@ int mosquitto_sub_topic_check(const char *str);
 int mqtt_subscribe(struct mqtt_client_t *client, char *topic, int qos);
 int mqtt_publish(struct mqtt_client_t *client, int dub, int qos, int retain, char *topic, char *message);
 int mqtt_suback(struct mqtt_client_t *client, int msgid, int qos);
+int mqtt_suback_codes(struct mqtt_client_t *client, int msgid, uint8_t *codes, int nrcodes);
+int mqtt_unsuback(struct mqtt_client_t *client, int msgid, uint8_t *codes, int nrcodes);
 int mqtt_puback(struct mqtt_client_t *client, int msgid);
 int mqtt_pubrel(struct mqtt_client_t *client, int msgid);
 int mqtt_pubrec(struct mqtt_client_t *client, int msgid);

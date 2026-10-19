@@ -372,7 +372,7 @@ static ssize_t client_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 		uv_timer_start(client->timeout_req, timeout, (client->keepalive*1.5)*1000, 0);
 #endif
 
-		while(iobuf->len > 0 && (ret = mqtt_decode(&pkt, (unsigned char *)iobuf->buf, iobuf->len, &pos)) == 0) {
+		while(iobuf->len > 0 && (ret = mqtt_decode_version(&pkt, (unsigned char *)iobuf->buf, iobuf->len, &pos, (client->version > 0) ? client->version : 4)) == 0) {
 			iobuf_remove(iobuf, pos);
 			pos = 0;
 
@@ -385,10 +385,36 @@ static ssize_t client_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 
 			switch(pkt->type) {
 				case MQTT_CONNECT: {
-					if(pkt->header.connect.cleansession == 0) {
+					/*
+					 * Supported: MQTT 3.1 ("MQIsdp", level 3), 3.1.1 ("MQTT", 4)
+					 * and 5.0 ("MQTT", 5). Mosquitto bridges may set bit 7 of the
+					 * level ("try_private"), which is masked off.
+					 */
+					int level = pkt->header.connect.version & 0x7F;
+					int known = 0;
+					if(pkt->header.connect.protocol != NULL) {
+						if(strcmp(pkt->header.connect.protocol, "MQTT") == 0 && (level == 4 || level == 5)) {
+							known = 1;
+						} else if(strcmp(pkt->header.connect.protocol, "MQIsdp") == 0 && level == 3) {
+							known = 1;
+						}
+					}
+					pkt1.version = (level == 5) ? 5 : 4;
+					if(known == 0 || client->step == MQTT_CONNECTED) {
+						/* 0x01 in 3.1.1, 0x84 "Unsupported Protocol Version" in 5.0 */
 						mqtt_pkt_connack(&pkt1, MQTT_CONNECTION_REFUSED_UNACCEPTABLE_PROTOCOL_VERSION);
+						if(level == 5) {
+							pkt1.payload.connack.code = 0x84;
+						}
+						disconnect = 1;
 					} else {
+						/*
+						 * pilight keeps no persistent sessions: a request for a
+						 * persistent session (clean session / clean start = 0) is
+						 * accepted as a new session, "session present" stays 0.
+						 */
 						mqtt_pkt_connack(&pkt1, MQTT_CONNECTION_ACCEPTED);
+						client->version = level;
 						client->step = MQTT_CONNECTED;
 						if((client->id = STRDUP(pkt->payload.connect.clientid)) == NULL) {
 							OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
@@ -447,6 +473,10 @@ static ssize_t client_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 						iobuf_append(&custom_poll_data->send_iobuf, (void *)buf1, len);
 						FREE(buf1);
 					}
+					if(disconnect == 1) {
+						/* refused: send the CONNACK, then close */
+						uv_custom_close(req);
+					}
 				} break;
 				case MQTT_PUBLISH: {
 #ifdef _WIN32
@@ -489,6 +519,10 @@ static ssize_t client_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 					while(clients) {
 						struct mqtt_subscription_t *subscription = clients->subscriptions;
 						while(subscription) {
+							if(subscription->nolocal == 1 && clients == client) {
+								subscription = subscription->next;
+								continue;
+							}
 							if(mosquitto_topic_matches_sub(subscription->topic, pkt->payload.publish.topic, &ret) == 0) {
 								if(ret == 1) {
 									int x = 0, pass = 1;
@@ -553,86 +587,130 @@ static ssize_t client_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 					mqtt_pubcomp(client, pkt->payload.pubrel.msgid);
 				} break;
 				case MQTT_SUBSCRIBE: {
-					mqtt_suback(client, pkt->payload.subscribe.msgid, pkt->payload.subscribe.qos);
+					int i = 0, n = pkt->payload.subscribe.nrtopics;
+					uint8_t *codes = NULL;
+					if((codes = MALLOC(n > 0 ? n : 1)) == NULL) {
+						OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
+					}
 #ifdef _WIN32
 					uv_mutex_lock(&mqtt_lock);
 #else
 					pthread_mutex_lock(&mqtt_lock);
 #endif
-					struct mqtt_subscription_t *subscription = client->subscriptions;
-					while(subscription) {
-						if(strcmp(subscription->topic, pkt->payload.subscribe.topic) == 0) {
-							break;
+					for(i=0;i<n;i++) {
+						char *filter = pkt->payload.subscribe.topics[i];
+						uint8_t options = pkt->payload.subscribe.options[i];
+						int qos = options & 0x03;
+
+						if(qos > 2 || mosquitto_sub_topic_check(filter) != 0 || strlen(filter) == 0) {
+							/* 0x80 failure (3.1.1) / 0x8F topic filter invalid (5.0) */
+							codes[i] = (client->version == 5) ? 0x8F : 0x80;
+							continue;
 						}
-						subscription = subscription->next;
-					}
+						codes[i] = qos;
 
-					if(subscription == NULL) {
-						if((subscription = MALLOC(sizeof(struct mqtt_subscription_t))) == NULL) {
-							OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
-						}
-						memset(subscription, 0, sizeof(struct mqtt_subscription_t));
-
-						subscription->next = client->subscriptions;
-						client->subscriptions = subscription;
-					}
-
-					if((subscription->topic = STRDUP(pkt->payload.subscribe.topic)) == NULL) {
-						OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
-					}
-					subscription->qos = pkt->payload.subscribe.qos;
-
-					struct mqtt_client_t *clients = mqtt_clients;
-					while(clients) {
-						if(clients != client) {
-							struct mqtt_message_t *message = clients->retain;
-							while(message) {
-								if(mosquitto_topic_matches_sub(pkt->payload.subscribe.topic, message->topic, &ret) == 0) {
-									if(ret == 1) {
-										int x = 0, pass = 1;
-										for(x=0;x<mqtt_blacklist_nr;x++) {
-											if(mosquitto_topic_matches_sub(mqtt_blacklist[x], message->topic, &ret) == 0) {
-												if(ret == 1) {
-													pass = 0;
-													break;
-												}
-											}
-										}
-										if(pass == 0) {
-											for(x=0;x<mqtt_whitelist_nr;x++) {
-												if(mosquitto_topic_matches_sub(mqtt_whitelist[x], message->topic, &ret) == 0) {
-													if(ret == 1) {
-														pass = 1;
-														break;
-													}
-												}
-											}
-										}
-										if(pass == 1) {
-											mqtt_publish(client, 0, pkt->payload.subscribe.qos, 0, message->topic, message->payload);
-										}
-									}
-								}
-								message = message->next;
+						struct mqtt_subscription_t *subscription = client->subscriptions;
+						while(subscription) {
+							if(strcmp(subscription->topic, filter) == 0) {
+								break;
 							}
+							subscription = subscription->next;
 						}
-						clients = clients->next;
+
+						if(subscription == NULL) {
+							if((subscription = MALLOC(sizeof(struct mqtt_subscription_t))) == NULL) {
+								OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
+							}
+							memset(subscription, 0, sizeof(struct mqtt_subscription_t));
+							if((subscription->topic = STRDUP(filter)) == NULL) {
+								OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
+							}
+
+							subscription->next = client->subscriptions;
+							client->subscriptions = subscription;
+						}
+						subscription->qos = qos;
+						/* MQTT 5 subscription option bit 2: No Local */
+						subscription->nolocal = (client->version == 5) ? ((options >> 2) & 0x01) : 0;
 					}
 #ifdef _WIN32
 					uv_mutex_unlock(&mqtt_lock);
 #else
 					pthread_mutex_unlock(&mqtt_lock);
 #endif
-				} break;
-				case MQTT_UNSUBSCRIBE: {
+
+					/* the SUBACK must precede retained messages */
+					mqtt_suback_codes(client, pkt->payload.subscribe.msgid, codes, n);
+
 #ifdef _WIN32
 					uv_mutex_lock(&mqtt_lock);
 #else
 					pthread_mutex_lock(&mqtt_lock);
 #endif
-					int i = 0;
-					for(i=0;i<pkt->payload.unsubscribe.nrtopics;i++) {
+					for(i=0;i<n;i++) {
+						if(codes[i] > 2) {
+							continue;
+						}
+						char *filter = pkt->payload.subscribe.topics[i];
+						struct mqtt_client_t *clients = mqtt_clients;
+						while(clients) {
+							if(clients != client) {
+								struct mqtt_message_t *message = clients->retain;
+								while(message) {
+									if(mosquitto_topic_matches_sub(filter, message->topic, &ret) == 0) {
+										if(ret == 1) {
+											int x = 0, pass = 1;
+											for(x=0;x<mqtt_blacklist_nr;x++) {
+												if(mosquitto_topic_matches_sub(mqtt_blacklist[x], message->topic, &ret) == 0) {
+													if(ret == 1) {
+														pass = 0;
+														break;
+													}
+												}
+											}
+											if(pass == 0) {
+												for(x=0;x<mqtt_whitelist_nr;x++) {
+													if(mosquitto_topic_matches_sub(mqtt_whitelist[x], message->topic, &ret) == 0) {
+														if(ret == 1) {
+															pass = 1;
+															break;
+														}
+													}
+												}
+											}
+											if(pass == 1) {
+												mqtt_publish(client, 0, codes[i], 0, message->topic, message->payload);
+											}
+										}
+									}
+									message = message->next;
+								}
+							}
+							clients = clients->next;
+						}
+					}
+#ifdef _WIN32
+					uv_mutex_unlock(&mqtt_lock);
+#else
+					pthread_mutex_unlock(&mqtt_lock);
+#endif
+					FREE(codes);
+				} break;
+				case MQTT_UNSUBSCRIBE: {
+					int i = 0, n = pkt->payload.unsubscribe.nrtopics;
+					uint8_t *codes = NULL;
+					if((codes = MALLOC(n > 0 ? n : 1)) == NULL) {
+						OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
+					}
+#ifdef _WIN32
+					uv_mutex_lock(&mqtt_lock);
+#else
+					pthread_mutex_lock(&mqtt_lock);
+#endif
+					for(i=0;i<n;i++) {
 						struct mqtt_subscription_t *sub = client->subscriptions, *prev = NULL;
+						/* 0x11 "No subscription existed" (5.0 only) */
+						codes[i] = 0x11;
 						while(sub) {
 							if(strcmp(sub->topic, pkt->payload.unsubscribe.topics[i]) == 0) {
 								if(prev == NULL) {
@@ -642,6 +720,7 @@ static ssize_t client_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 								}
 								FREE(sub->topic);
 								FREE(sub);
+								codes[i] = 0x00;
 								break;
 							}
 							prev = sub;
@@ -653,13 +732,8 @@ static ssize_t client_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 #else
 					pthread_mutex_unlock(&mqtt_lock);
 #endif
-					/* UNSUBACK: fixed header, remaining length 2, packet identifier */
-					unsigned char unsuback[4] = {
-						(MQTT_UNSUBACK << 4), 0x02,
-						(pkt->payload.unsubscribe.msgid >> 8) & 0xFF,
-						pkt->payload.unsubscribe.msgid & 0xFF
-					};
-					iobuf_append(&custom_poll_data->send_iobuf, (void *)unsuback, 4);
+					mqtt_unsuback(client, pkt->payload.unsubscribe.msgid, codes, n);
+					FREE(codes);
 				} break;
 				case MQTT_PINGREQ: {
 					mqtt_pingresp(client);
