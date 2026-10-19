@@ -30,6 +30,8 @@ typedef struct mqtt_message_t {
 	struct mqtt_message_t *next;
 } mqtt_message_t;
 
+#define MQTT_MAX_INFLIGHT 1024
+
 typedef struct mqtt_pkt_t {
 	uint8_t type;
 	uint8_t dub;
@@ -135,7 +137,7 @@ typedef struct mqtt_client_t {
 
 	struct iobuf_t recv_iobuf;
 	struct iobuf_t send_iobuf;
-	struct mqtt_message_t messages[1024];
+	struct mqtt_message_t messages[MQTT_MAX_INFLIGHT];
 	struct mqtt_message_t *retain;
 	struct mqtt_subscription_t *subscriptions;
 

@@ -613,7 +613,7 @@ size_t iobuf_append_remove(struct iobuf_t *a, struct iobuf_t *b) {
 		b->len += a->len;
 	} else if((p = REALLOC(b->buf, b->len + a->len + 1)) != NULL) {
 		b->buf = p;
-		memset(&b->buf[b->len], 0, b->len + a->len);
+		memset(&b->buf[b->len], 0, a->len + 1);
 		memcpy(b->buf + b->len, a->buf, a->len);
 		b->len += a->len;
 		b->size = b->len;

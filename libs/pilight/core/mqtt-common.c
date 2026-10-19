@@ -999,7 +999,7 @@ int mqtt_subscribe(struct mqtt_client_t *client, char *topic, int qos) {
 		unsigned char *buf = NULL;
 		unsigned int len = 0;
 		memset(&pkt, 0, sizeof(struct mqtt_pkt_t));
-		client->msgid = (client->msgid + 1) % 1024;
+		client->msgid = (client->msgid % (MQTT_MAX_INFLIGHT-1)) + 1; /* 1..1023, 0 is not a valid packet identifier */
 
 		mqtt_pkt_subscribe(&pkt, topic, client->msgid, qos);
 		pkt.version = client->version;
@@ -1240,7 +1240,7 @@ int mqtt_publish(struct mqtt_client_t *client, int dub, int qos, int retain, cha
 		unsigned char *buf = NULL;
 		unsigned int len = 0;
 		memset(&pkt, 0, sizeof(struct mqtt_pkt_t));
-		client->msgid = (client->msgid + 1) % 1024;
+		client->msgid = (client->msgid % (MQTT_MAX_INFLIGHT-1)) + 1; /* 1..1023, 0 is not a valid packet identifier */
 
 		mqtt_pkt_publish(&pkt, dub, qos, retain, topic, client->msgid, payload);
 

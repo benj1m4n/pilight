@@ -383,6 +383,14 @@ static ssize_t client_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 			struct mqtt_pkt_t pkt1;
 			memset(&pkt1, 0, sizeof(struct mqtt_pkt_t));
 
+			if(pkt->type != MQTT_CONNECT && client->step != MQTT_CONNECTED) {
+				/* the first packet of a connection must be CONNECT */
+				mqtt_free(pkt);
+				FREE(pkt);
+				disconnect = 1;
+				break;
+			}
+
 			switch(pkt->type) {
 				case MQTT_CONNECT: {
 					/*
@@ -473,10 +481,7 @@ static ssize_t client_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 						iobuf_append(&custom_poll_data->send_iobuf, (void *)buf1, len);
 						FREE(buf1);
 					}
-					if(disconnect == 1) {
-						/* refused: send the CONNACK, then close */
-						uv_custom_close(req);
-					}
+					/* refused (disconnect == 1): the CONNACK is sent, then closed below */
 				} break;
 				case MQTT_PUBLISH: {
 #ifdef _WIN32
@@ -567,8 +572,12 @@ static ssize_t client_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 				} break;
 				case MQTT_PUBCOMP:
 				case MQTT_PUBACK: {
+					/* packet identifiers come from the peer: stay inside messages[] */
+					if(pkt->payload.puback.msgid >= MQTT_MAX_INFLIGHT) {
+						break;
+					}
 					struct mqtt_message_t *message = &client->messages[pkt->payload.puback.msgid];
-					if(message->step == MQTT_PUBACK || message->step == MQTT_PUBCOMP) {
+					if(message->timer_req != NULL && (message->step == MQTT_PUBACK || message->step == MQTT_PUBCOMP)) {
 						uv_timer_stop(message->timer_req);
 						uv_close((uv_handle_t *)message->timer_req, close_cb);
 						FREE(message->topic);
@@ -577,6 +586,9 @@ static ssize_t client_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 					}
 				} break;
 				case MQTT_PUBREC: {
+					if(pkt->payload.puback.msgid >= MQTT_MAX_INFLIGHT) {
+						break;
+					}
 					struct mqtt_message_t *message = &client->messages[pkt->payload.puback.msgid];
 					if(message->step == MQTT_PUBREC) {
 						message->step = MQTT_PUBCOMP;
@@ -679,7 +691,7 @@ static ssize_t client_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 												}
 											}
 											if(pass == 1) {
-												mqtt_publish(client, 0, codes[i], 0, message->topic, message->payload);
+												mqtt_publish(client, 0, codes[i], 1, message->topic, message->payload);
 											}
 										}
 									}
@@ -742,18 +754,26 @@ static ssize_t client_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 				} break;
 				case MQTT_DISCONNECT: {
 					disconnect = 1;
-					uv_custom_close(req);
 				} break;
 			}
 			mqtt_free(pkt);
 			FREE(pkt);
+			if(disconnect == 1) {
+				/* closing frees the client: stop processing its data here */
+				break;
+			}
 		}
 	}
 
+	if(disconnect == 1) {
+		/* flushes pending output (e.g. a CONNACK refusal), then closes */
+		uv_custom_close(req);
+		return nread;
+	}
+
 	if(ret == -1) {
-		if(!uv_is_closing((uv_handle_t *)client->async_req)) {
-			uv_close((uv_handle_t *)client->async_req, close_cb);
-		}
+		/* client_close_cb() releases async_req; closing it here as well
+		 * left a dangling handle for the deferred close callback */
 		uv_custom_close(req);
 	} else if(disconnect == 0) {
 		uv_custom_write(req);
