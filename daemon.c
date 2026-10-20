@@ -2797,6 +2797,8 @@ static void mqtt_callback(struct mqtt_client_t *client, struct mqtt_pkt_t *pkt, 
 
 								if(devices_get(array[3], &dev) == 0) {
 									control_device(dev, state, json_first_child(json), ORIGIN_SENDER);
+								} else {
+									logprintf(LOG_NOTICE, "mqtt: no device named \"%s\" (topic %s), names are case sensitive", array[3], pkt->payload.publish.topic);
 								}
 								if(jchild != NULL) {
 									json_delete(jchild);
@@ -2823,6 +2825,8 @@ static void mqtt_callback(struct mqtt_client_t *client, struct mqtt_pkt_t *pkt, 
 									control_device(dev, pkt->payload.publish.message, json_first_child(json), ORIGIN_SENDER);
 									json_delete(json);
 								}
+							} else {
+								logprintf(LOG_NOTICE, "mqtt: no device named \"%s\" (topic %s), names are case sensitive", array[3], pkt->payload.publish.topic);
 							}
 						}
 					}
