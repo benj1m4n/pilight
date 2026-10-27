@@ -191,3 +191,6 @@ void init(void) {
 	alectoWSD17Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *alecto_wsd17;

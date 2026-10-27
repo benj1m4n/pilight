@@ -142,9 +142,7 @@ static int plua_wiringx_set_userdata(lua_State *L) {
 		}
 
 		wiringx->table = (void *)lua_topointer(L, -1);
-		if(wiringx->table->ref != NULL) {
-			uv_sem_post(wiringx->table->ref);
-		}
+		atomic_inc(wiringx->table->ref);
 
 		lua_pushboolean(L, 1);
 
@@ -624,14 +622,16 @@ static int plua_wiringx_isr(struct lua_State *L) {
 		if(gpio >= 0) {
 			struct lua_wiringx_gpio_t *tmp = plua_wiringx_get_gpio_struct(wiringx, gpio);
 
-			if(wiringXISR(gpio, mode) < 0) {
+			int fd = -1;
+			if(wiringXISR(gpio, mode) < 0 || (fd = wiringXSelectableFd(gpio)) < 0) {
 				/*
-				 * FIXME
+				 * Without a valid file descriptor uv_poll_start() crashes
+				 * the daemon (e.g. when the sysfs GPIO export fails).
 				 */
-				// log
+				logprintf(LOG_ERR, "wiringX: could not set up interrupt on GPIO %d, receiving is disabled", gpio);
+				assert(plua_check_stack(L, 0) == 0);
+				return 0;
 			}
-
-			int fd = wiringXSelectableFd(gpio);
 
 			if(tmp->timer_req != NULL) {
 				uv_timer_stop(tmp->timer_req);
@@ -720,7 +720,7 @@ int plua_wiringx_setup(struct lua_State *L) {
 		pluaL_error(L, "wiringX setup requires 1 argument, %d given", lua_gettop(L));
 	}
 
-#if !defined(__arm__) && !defined(__mips__) && !defined(PILIGHT_UNITTEST)
+#if !defined(__arm__) && !defined(__mips__) && !defined(__aarch64__) && !defined(PILIGHT_UNITTEST)
 	lua_remove(L, -1);
 	lua_pushboolean(L, 0);
 #else

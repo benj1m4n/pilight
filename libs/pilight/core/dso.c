@@ -119,3 +119,6 @@ void *dso_function(void *handle, const char *name) {
 	return 0;
 #endif
 }
+
+/* single definitions (previously tentative definitions in the header) */
+struct dso_t *dso;

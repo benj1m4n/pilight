@@ -428,3 +428,6 @@ void init(void) {
 	quiggGT1000Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *quigg_gt1000;

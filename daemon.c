@@ -41,6 +41,10 @@
 #include <wiringx.h>
 #endif
 #include <assert.h>
+#include <float.h>
+
+#define MEMU_IMPLEMENTATION
+#include "libs/pilight/core/memu.h"
 
 #include "libs/pilight/core/pilight.h"
 #include "libs/pilight/core/threads.h"
@@ -58,10 +62,15 @@
 #include "libs/pilight/core/firmware.h"
 #include "libs/pilight/core/proc.h"
 #include "libs/pilight/core/ntp.h"
+#include "libs/pilight/core/mqtt.h"
 #include "libs/pilight/config/config.h"
 #include "libs/pilight/config/hardware.h"
 #include "libs/pilight/lua_c/lua.h"
 #include "libs/pilight/lua_c/table.h"
+
+#ifndef DBL_DECIMAL_DIG
+	#define DBL_DECIMAL_DIG 11
+#endif
 
 #ifdef EVENTS
 	#include "libs/pilight/events/events.h"
@@ -173,10 +182,6 @@ static char *pid_file = NULL;
 #endif
 /* Daemonize or not */
 static int nodaemon = 0;
-/* Run tracktracer */
-static int stacktracer = 0;
-/* Run thread profiler */
-static int threadprofiler = 0;
 /* Are we already running */
 static int running = 1;
 /* Are we currently sending code */
@@ -198,6 +203,9 @@ static int master_port = 0;
 static int adhoc_pending = 0;
 static char *configtmp = NULL;
 static int verbosity = LOG_INFO;
+#if defined(DEBUG) && !defined(__mips__) && !defined(__aarch64__)
+static int heaptracker = 0;
+#endif
 struct socket_callback_t socket_callback;
 
 #ifdef _WIN32
@@ -207,7 +215,6 @@ struct socket_callback_t socket_callback;
 
 static struct options_t *options = NULL;
 
-
 #ifdef WEBSERVER
 /* Do we enable the webserver */
 static int webserver_enable = WEBSERVER_ENABLE;
@@ -216,6 +223,32 @@ static int webgui_websockets = WEBGUI_WEBSOCKETS;
 static int webserver_http_port = WEBSERVER_HTTP_PORT;
 /* The webroot of pilight */
 static char *webserver_root = NULL;
+#endif
+
+#ifdef MQTT
+typedef struct mqtt_publish_t {
+	struct mqtt_client_t *client;
+	int dub;
+	int qos;
+	int retain;
+	char *topic;
+	char *payload;
+
+	struct mqtt_publish_t *next;
+} mqtt_publish_t;
+
+static struct mqtt_publish_t *mqtt_publish_list = NULL;
+static struct mqtt_publish_t *mqtt_publish_head = NULL;
+static unsigned int mqtt_publish_nr = 0;
+
+static void mqtt_publish_r(struct mqtt_client_t *client, int dub, int qos, int retain, char *topic, char *payload);
+
+uv_async_t *mqtt_publish_req = NULL;
+uv_mutex_t mqtt_publish_lock;
+
+static int mqtt_enable = MQTT_ENABLE;
+static int mqtt_port = MQTT_PORT;
+static struct mqtt_client_t *mqtt_global_client = NULL;
 #endif
 
 static char *lua_root = LUA_ROOT;
@@ -232,7 +265,7 @@ static void *reason_send_code_free(void *param) {
 
 static void *reason_broadcast_core_free(void *param) {
 	char *code = param;
-	FREE(code);
+	json_free(code);
 	return NULL;
 }
 
@@ -400,6 +433,94 @@ void *broadcast(void *param) {
 									}
 								}
 								if(match1 == 1) {
+#ifdef MQTT
+									/*
+									 * START MQTT BROADCAST
+									 */
+									if(mqtt_global_client != NULL) {
+										char *topicfmt = "pilight/dev/stat/%s/%s";
+										char *topicfmt1 = "pilight/dev/stat/%s";
+										struct JsonNode *jdevices = json_find_member(jtmp, "devices");
+										struct JsonNode *jchilds = json_first_child(jdevices);
+										while(jchilds) {
+											int len = 0;
+											struct JsonNode *jvalues = json_find_member(jtmp, "values");
+											if(jvalues != NULL) {
+												len = snprintf(NULL, 0, topicfmt1, jchilds->string_);
+												char *topic = MALLOC(len+1);
+												if(topic == NULL) {
+													OUT_OF_MEMORY
+												}
+												memset(topic, '\0', len);
+												snprintf(topic, len+1, topicfmt1, jchilds->string_);
+
+												char *out = json_stringify(jvalues, NULL);
+												mqtt_publish_r(mqtt_global_client, 0, 0, 0, topic, out);
+												json_free(out);
+												FREE(topic);
+
+												struct JsonNode *jchilds1 = json_first_child(jvalues);
+												while(jchilds1) {
+													len = snprintf(NULL, 0, topicfmt, jchilds->string_, jchilds1->key);
+													char *topic = MALLOC(len+1);
+													if(topic == NULL) {
+														OUT_OF_MEMORY
+													}
+													memset(topic, '\0', len);
+													snprintf(topic, len+1, topicfmt, jchilds->string_, jchilds1->key);
+
+													if(jchilds1->tag == JSON_NUMBER) {
+														len = snprintf(NULL, 0, "%.*g", DBL_DECIMAL_DIG - 1, jchilds1->number_);
+													} else if(jchilds1->tag == JSON_STRING) {
+														len = strlen(jchilds1->string_);
+													}
+
+													char *payload = NULL;
+													if((payload = MALLOC(len+1)) == NULL) {
+														OUT_OF_MEMORY
+													}
+													memset(payload, '\0', len+1);
+
+													if(jchilds1->tag == JSON_NUMBER) {
+														len = snprintf(payload, len+1, "%.*g", DBL_DECIMAL_DIG - 1, jchilds1->number_);
+													} else if(jchilds1->tag == JSON_STRING) {
+														strcpy(payload, jchilds1->string_);
+													}
+													mqtt_publish_r(mqtt_global_client, 0, 0, 0, topic, payload);
+													jchilds1 = jchilds1->next;
+													FREE(payload);
+													FREE(topic);
+												}
+												struct JsonNode *jstate = json_find_member(jtmp, "state");
+												if(jstate != NULL) {
+													if(jstate->tag == JSON_NUMBER) {
+														len = snprintf(NULL, 0, "%.*g", DBL_DECIMAL_DIG - 1, jstate->number_);
+													} else if(jstate->tag == JSON_STRING) {
+														len = strlen(jstate->string_);
+													}
+
+													char *payload = NULL;
+													if((payload = MALLOC(len+1)) == NULL) {
+														OUT_OF_MEMORY
+													}
+													memset(payload, '\0', len+1);
+
+													if(jstate->tag == JSON_NUMBER) {
+														len = snprintf(payload, len+1, "%.*g", DBL_DECIMAL_DIG - 1, jstate->number_);
+													} else if(jstate->tag == JSON_STRING) {
+														strcpy(payload, jstate->string_);
+													}
+													mqtt_publish_r(mqtt_global_client, 0, 0, 0, "state", payload);
+													FREE(payload);
+												}
+											}
+											jchilds = jchilds->next;
+										}
+									}
+									/*
+									 * END MQTT BROADCAST
+									 */
+#endif
 									char *conf = json_stringify(jtmp, NULL);
 									socket_write(tmp_clients->id, conf);
 									logprintf(LOG_DEBUG, "broadcasted: %s", conf);
@@ -439,12 +560,10 @@ void *broadcast(void *param) {
 							json_find_number(code, "lpf", &firmware.lpf);
 							json_find_number(code, "hpf", &firmware.hpf);
 							if(firmware.version > 0 && firmware.lpf > 0 && firmware.hpf > 0) {
-								struct lua_state_t *state = plua_get_free_state();
-								config_registry_set_number(state->L, "pilight.firmware.version", firmware.version);
-								config_registry_set_number(state->L, "pilight.firmware.lpf", firmware.lpf);
-								config_registry_set_number(state->L, "pilight.firmware.hpf", firmware.hpf);
-								assert(plua_check_stack(state->L, 0) == 0);
-								plua_clear_state(state);
+								struct plua_metatable_t *table = config_get_metatable();
+								plua_metatable_set_number(table, "registry.pilight.firmware.version", firmware.version);
+								plua_metatable_set_number(table, "registry.pilight.firmware.lpf", firmware.lpf);
+								plua_metatable_set_number(table, "registry.pilight.firmware.hpf", firmware.hpf);
 
 								struct JsonNode *jmessage = json_mkobject();
 								struct JsonNode *jcode = json_mkobject();
@@ -605,7 +724,7 @@ static void *receiveAPI1(int reason, void *param, void *userdata) {
 
 	plua_metatable_to_json(table, &json);
 
-	if(json != NULL &&
+	if(json != NULL && json_check(json, NULL) == 1 &&
 		json_find_string(json, "protocol", &protocol) == 0 &&
 		json_find_string(json, "origin", &origin) == 0) {
 		broadcast_queue(protocol, json, RECEIVER);
@@ -1044,8 +1163,6 @@ static void client_webserver_parse_code(int i, char buffer[BUFFER_SIZE]) {
 #endif
 
 static int control_device(struct devices_t *dev, char *state, struct JsonNode *values, enum origin_t origin) {
-	logprintf(LOG_STACK, "%s(...)", __FUNCTION__);
-
 	struct devices_settings_t *sett = NULL;
 	struct devices_values_t *val = NULL;
 	struct options_t *opt = NULL;
@@ -1205,6 +1322,12 @@ static void socket_parse_data(int i, char *buffer) {
 						break;
 					}
 					tmp_clients = tmp_clients->next;
+				}
+				/*
+				 * Client did not identify itself first.
+				 */
+				if(client == NULL && strcmp(action, "identify") != 0) {
+					goto error;
 				}
 				if(strcmp(action, "identify") == 0) {
 					/* Check if client doesn't already exist */
@@ -1510,6 +1633,7 @@ static void socket_parse_data(int i, char *buffer) {
 		}
 	}
 	if(error == 1) {
+error:
 		client_remove(sd);
 		socket_close(sd);
 	}
@@ -2050,8 +2174,8 @@ static void *socket_parse_data1(int reason, void *param, void *userdata) {
 		return NULL;
 	} else {
 		logprintf(LOG_ERR, "could not parse response to: %s", data->buffer);
-		client_remove(sd);
-		socket_close(sd);
+		//client_remove(sd);
+		//socket_close(sd);
 		json_delete(json);
 		return NULL;
 	}
@@ -2376,7 +2500,7 @@ int main_gc(void) {
 #ifndef _WIN32
 	if(running == 0) {
 		/* Remove the stale pid file */
-		if(access(pid_file, F_OK) != -1) {
+		if(pid_file != NULL && access(pid_file, F_OK) != -1) {
 			if(remove(pid_file) != -1) {
 				logprintf(LOG_INFO, "removed stale pid_file %s", pid_file);
 			} else {
@@ -2389,6 +2513,7 @@ int main_gc(void) {
 		FREE(pid_file);
 	}
 #endif
+	plua_gc();
 	eventpool_gc();
 #ifdef WEBSERVER
 	if(webserver_enable == 1) {
@@ -2418,13 +2543,24 @@ int main_gc(void) {
 	dso_gc();
 	log_gc();
 	ssl_gc();
-	plua_gc();
+
+#ifdef MQTT
+	if(mqtt_global_client != NULL) {
+		int i = 0;
+		mqtt_publish_r(mqtt_global_client, 0, 0, 0, "pilight/stat", "offline");
+		for(i=0;i<3;i++) {
+			uv_run(uv_default_loop(), UV_RUN_ONCE);
+		}
+	}
+
+	mqtt_server_gc();
+	mqtt_client_gc();
+#endif
 
 	uv_stop(uv_default_loop());
 	options_delete(options);
 	gc_clear();
 	FREE(progname);
-	xfree();
 
 #ifdef _WIN32
 	WSACleanup();
@@ -2433,7 +2569,9 @@ int main_gc(void) {
 	}
 #endif
 
-	FREE(signal_req);
+	if(signal_req != NULL) {
+		FREE(signal_req);
+	}
 
 	running = 0;
 
@@ -2463,11 +2601,8 @@ void registerVersion(void) {
 	logprintf(LOG_STACK, "%s(...)", __FUNCTION__);
 
 	{
-		struct lua_state_t *state = plua_get_free_state();
-		config_registry_set_null(state->L, "pilight.version");
-		config_registry_set_string(state->L, "pilight.version.current", (char *)PILIGHT_VERSION);
-		assert(plua_check_stack(state->L, 0) == 0);
-		plua_clear_state(state);
+		struct plua_metatable_t *table = config_get_metatable();
+		plua_metatable_set_string(table, "registry.pilight.version.current", (char *)PILIGHT_VERSION);
 	}
 }
 #ifndef _WIN32
@@ -2517,7 +2652,239 @@ static void pilight_abort(uv_timer_t *timer_req) {
 	exit(EXIT_FAILURE);
 }
 
+#ifdef MQTT
+static void *mqtt_client_remove_cb(int reason, void *param, void *userdata) {
+	uv_mutex_lock(&mqtt_publish_lock);
+
+	struct mqtt_client_t *client = param;
+	struct mqtt_publish_t *currP, *prevP;
+	int removed = 1;
+	prevP = NULL;
+
+	while(removed) {
+		removed = 0;
+		for(currP = mqtt_publish_list; currP != NULL; prevP = currP, currP = currP->next) {
+			if(currP->client == client) {
+				if(prevP == NULL) {
+					mqtt_publish_list = currP->next;
+				} else {
+					prevP->next = currP->next;
+				}
+
+				FREE(currP->topic);
+				FREE(currP->payload);
+				FREE(currP);
+				mqtt_publish_nr--;
+				removed = 1;
+				break;
+			}
+		}
+	}
+	uv_mutex_unlock(&mqtt_publish_lock);
+	return NULL;
+}
+
+
+static void mqtt_safe_publish(uv_async_t *handle) {
+	uv_mutex_lock(&mqtt_publish_lock);
+
+	struct mqtt_publish_t *node = NULL;
+	while(mqtt_publish_nr > 0) {
+		node = mqtt_publish_list;
+		mqtt_publish(node->client, node->dub, node->qos, node->retain, node->topic, node->payload);
+		FREE(node->topic);
+		FREE(node->payload);
+		mqtt_publish_list = mqtt_publish_list->next;
+		FREE(node);
+		mqtt_publish_nr--;
+	}
+
+	uv_mutex_unlock(&mqtt_publish_lock);
+}
+
+static void mqtt_publish_r(struct mqtt_client_t *client, int dub, int qos, int retain, char *topic, char *payload) {
+	struct mqtt_publish_t *publish = NULL;
+	if((publish = MALLOC(sizeof(struct mqtt_publish_t))) == NULL) {
+		OUT_OF_MEMORY
+	}
+	memset(publish, 0, sizeof(struct mqtt_publish_t));
+	publish->client = client;
+	publish->dub = dub;
+	publish->qos = qos;
+	publish->retain = retain;
+	if((publish->topic = STRDUP(topic)) == NULL) {
+		OUT_OF_MEMORY
+	}
+	if((publish->payload = STRDUP(payload)) == NULL) {
+		OUT_OF_MEMORY
+	}
+
+	uv_mutex_lock(&mqtt_publish_lock);
+	if(mqtt_publish_nr == 0) {
+		mqtt_publish_list = publish;
+		mqtt_publish_head = publish;
+	} else {
+		mqtt_publish_head->next = publish;
+		mqtt_publish_head = publish;
+	}
+	mqtt_publish_nr++;
+	uv_mutex_unlock(&mqtt_publish_lock);
+
+	uv_async_send(mqtt_publish_req);
+}
+
+
+static void mqtt_callback(struct mqtt_client_t *client, struct mqtt_pkt_t *pkt, void *userdata) {
+	if(pkt != NULL) {
+		switch(pkt->type) {
+			case MQTT_CONNACK: {
+				mqtt_global_client = client;
+
+#ifdef HASH
+				mqtt_publish_r(client, 0, 0, 1, "pilight/sys/version", HASH);
+#else
+				mqtt_publish_r(client, 0, 0, 1, "pilight/sys/version", PILIGHT_VERSION);
+#endif
+
+				{
+					char **devs = NULL, host[INET_ADDRSTRLEN+1], *p = host;
+					int nrdevs = 0, x = 0;
+					if((nrdevs = inetdevs(&devs)) > 0) {
+						for(x=0;x<nrdevs;x++) {
+							if(dev2ip(devs[x], &p, AF_INET) == 0) {
+								mqtt_publish_r(client, 0, 0, 1, "pilight/sys/ip", host);
+							}
+						}
+					}
+					array_free(&devs, nrdevs);
+				}
+
+				{
+					int len = snprintf(NULL, 0, "%d", socket_get_port());
+					char *output = MALLOC(len+1);
+					if(output == NULL) {
+						OUT_OF_MEMORY
+					}
+					memset(output, '\0', len+1);
+					snprintf(output, len+1, "%d", socket_get_port());
+					mqtt_publish_r(client, 0, 0, 1, "pilight/sys/port", output);
+					FREE(output);
+				}
+
+				mqtt_subscribe(client, "pilight/dev/ctrl/#", 0);
+			} break;
+			case MQTT_PUBLISH: {
+				if(pkt->payload.publish.message == NULL) {
+					logprintf(LOG_ERR, "pilight/dev/ctrl/+ mqtt messages require a json payload");
+				} else {
+					char **array = NULL;
+					int n = explode(pkt->payload.publish.topic, "/", &array);
+					if(n == 4) {
+						if(strcmp(array[0], "pilight") == 0 && strcmp(array[1], "dev") == 0 && strcmp(array[2], "ctrl") == 0) {
+							struct JsonNode *json = json_decode(pkt->payload.publish.message);
+							if(json != NULL) {
+								struct JsonNode *jchild = NULL;
+
+								char *state = NULL;
+								if((jchild = json_find_member(json, "state")) != NULL) {
+									if(jchild->tag == JSON_STRING) {
+										state = jchild->string_;
+									}
+									json_remove_from_parent(jchild);
+								}
+
+								struct devices_t *dev = NULL;
+
+								if(devices_get(array[3], &dev) == 0) {
+									control_device(dev, state, json_first_child(json), ORIGIN_SENDER);
+								}
+								if(jchild != NULL) {
+									json_delete(jchild);
+								}
+
+								json_delete(json);
+							} else {
+								logprintf(LOG_ERR, "pilight/dev/ctrl/+ mqtt messages require a json payload");
+							}
+						}
+					} else if(n == 5) {
+						if(strcmp(array[0], "pilight") == 0 && strcmp(array[1], "dev") == 0 && strcmp(array[2], "ctrl") == 0) {
+							struct devices_t *dev = NULL;
+							if(devices_get(array[3], &dev) == 0) {
+								if(strcmp(array[4], "state") == 0) {
+									control_device(dev, pkt->payload.publish.message, NULL, ORIGIN_SENDER);
+								} else {
+									struct JsonNode *json = json_mkobject();
+									if(isNumeric(pkt->payload.publish.message) == 0) {
+										json_append_member(json, array[4], json_mknumber(atof(pkt->payload.publish.message), nrDecimals(pkt->payload.publish.message)));
+									} else {
+										json_append_member(json, array[4], json_mkstring(pkt->payload.publish.message));
+									}
+									control_device(dev, pkt->payload.publish.message, json_first_child(json), ORIGIN_SENDER);
+									json_delete(json);
+								}
+							}
+						}
+					}
+					array_free(&array, n);
+				}
+			} break;
+			case MQTT_DISCONNECTED: {
+				mqtt_global_client = NULL;
+
+				mqtt_client("127.0.0.1", mqtt_port, "pilight-daemon", NULL, NULL, mqtt_callback, NULL);
+			} break;
+		}
+	}
+}
+#endif
+
+#ifdef _WIN32
+static unsigned long long total_system_memory() {
+	MEMORYSTATUSEX status;
+	status.dwLength = sizeof(status);
+	GlobalMemoryStatusEx(&status);
+	return status.ullTotalPhys;
+}
+#else
+static unsigned long long total_system_memory() {
+	long pages = sysconf(_SC_PHYS_PAGES);
+	long page_size = sysconf(_SC_PAGE_SIZE);
+	return pages * page_size;
+}
+#endif
+
+
+#if defined(DEBUG) && !defined(__mips__) && !defined(__aarch64__)
+static void thread_free(uv_work_t *req, int status) {
+	FREE(req);
+}
+
+static void thread(uv_work_t *req) {
+	memanalyze();
+}
+#endif
+
 static void pilight_stats(uv_timer_t *timer_req) {
+	if(main_loop == 0) {
+		return;
+	}
+
+#if defined(DEBUG) && !defined(__mips__) && !defined(__aarch64__)
+	time_t t = time(NULL);
+	if(heaptracker == 1) {
+		heaptrack();
+		if((t % 300) >= 0 && (t % 300) < 3) {
+			uv_work_t *work_req = NULL;
+			if((work_req = MALLOC(sizeof(uv_work_t))) == NULL) {
+				OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
+			}
+			work_req->data = NULL;
+			uv_queue_work_s(work_req, "heaptrack", 1, thread, thread_free);
+		}
+	}
+#endif
+
 	int watchdog = 1, stats = 1;
 	// double itmp = 0.0;
 	{
@@ -2528,12 +2895,13 @@ static void pilight_stats(uv_timer_t *timer_req) {
 		plua_clear_state(state);
 	}
 
-	if(pilight.runmode == STANDALONE) {
-		registerVersion();
-	}
-
 	if(stats == 1) {
 		double cpu = 0.0;
+		size_t mem_u = memu_get_curr_rss();
+		size_t mem_x = memu_get_peak_rss();
+		unsigned long long mem_t = total_system_memory();
+		double mem_p = ((double)mem_u/(double)mem_t)*100;
+
 		cpu = getCPUUsage();
 		if(watchdog == 1 && (cpu > 90)) {
 			logprintf(LOG_CRIT, "cpu usage too high %f%%, will abort when this persists", cpu);
@@ -2546,7 +2914,8 @@ static void pilight_stats(uv_timer_t *timer_req) {
 			procProtocol->message = json_mkobject();
 			struct JsonNode *code = json_mkobject();
 			json_append_member(code, "cpu", json_mknumber(cpu, 16));
-			logprintf(LOG_DEBUG, "cpu: %f%%", cpu);
+			json_append_member(code, "mem", json_mknumber(mem_p, 16));
+			logprintf(LOG_DEBUG, "cpu: %f%%, mem: %f%%, %lu / %llu, %lu", cpu, mem_p, mem_u, mem_t, mem_x);
 			json_append_member(procProtocol->message, "values", code);
 			json_append_member(procProtocol->message, "origin", json_mkstring("core"));
 			json_append_member(procProtocol->message, "type", json_mknumber(PROCESS, 0));
@@ -2558,6 +2927,83 @@ static void pilight_stats(uv_timer_t *timer_req) {
 				}
 				tmp_clients = tmp_clients->next;
 			}
+
+#ifdef MQTT
+			{
+				if(cpu > 0.000001) {
+					int len = snprintf(NULL, 0, "%.*g", 6, cpu);
+					char *output = MALLOC(len+1);
+					if(output == NULL) {
+						OUT_OF_MEMORY
+					}
+					memset(output, '\0', len+1);
+					snprintf(output, len+1, "%.*g", 6, cpu);
+					if(mqtt_global_client != NULL) {
+						mqtt_publish_r(mqtt_global_client, 0, 0, 0, "pilight/sys/cpu", output);
+					}
+					FREE(output);
+				}
+
+				if(mem_p > 0.000001) {
+					{
+						int len = snprintf(NULL, 0, "%.*g", 6, mem_p);
+						char *output = MALLOC(len+1);
+						if(output == NULL) {
+							OUT_OF_MEMORY
+						}
+						memset(output, '\0', len+1);
+						snprintf(output, len+1, "%.*g", 6, mem_p);
+						if(mqtt_global_client != NULL) {
+							mqtt_publish_r(mqtt_global_client, 0, 0, 0, "pilight/sys/mem/perc", output);
+						}
+						FREE(output);
+					}
+
+					{
+						int len = snprintf(NULL, 0, "%zu", mem_u);
+						char *output = MALLOC(len+1);
+						if(output == NULL) {
+							OUT_OF_MEMORY
+						}
+						memset(output, '\0', len+1);
+						snprintf(output, len+1, "%zu", mem_u);
+						if(mqtt_global_client != NULL) {
+							mqtt_publish_r(mqtt_global_client, 0, 0, 0, "pilight/sys/mem/rss", output);
+						}
+						FREE(output);
+					}
+
+					{
+						int len = snprintf(NULL, 0, "%zu", mem_x);
+						char *output = MALLOC(len+1);
+						if(output == NULL) {
+							OUT_OF_MEMORY
+						}
+						memset(output, '\0', len+1);
+						snprintf(output, len+1, "%zu", mem_x);
+						if(mqtt_global_client != NULL) {
+							mqtt_publish_r(mqtt_global_client, 0, 0, 0, "pilight/sys/mem/peak", output);
+						}
+						FREE(output);
+					}
+
+					{
+						int len = snprintf(NULL, 0, "%llu", mem_t);
+						char *output = MALLOC(len+1);
+						if(output == NULL) {
+							OUT_OF_MEMORY
+						}
+						memset(output, '\0', len+1);
+						snprintf(output, len+1, "%llu", mem_t);
+						if(mqtt_global_client != NULL) {
+							mqtt_publish_r(mqtt_global_client, 0, 0, 0, "pilight/sys/mem/sys", output);
+						}
+						FREE(output);
+					}
+				}
+			}
+#endif
+
 			pilight.broadcast(procProtocol->id, procProtocol->message, STATS);
 			json_delete(procProtocol->message);
 			procProtocol->message = NULL;
@@ -2595,10 +3041,14 @@ static void signal_cb(uv_signal_t *handle, int signum) {
 
 	main_gc();	
 	uv_stop(uv_default_loop());
-	FREE(signal_req);
+	if(signal_req != NULL) {
+		FREE(signal_req);
+	}
 }
 
 int start_pilight(int argc, char **argv) {
+	// uv_replace_allocator(_MALLOC, _REALLOC, _CALLOC, _FREE);
+
 	const uv_thread_t pth_cur_id = uv_thread_self();
 	memcpy((void *)&pth_main_id, &pth_cur_id, sizeof(uv_thread_t));
 
@@ -2644,10 +3094,9 @@ int start_pilight(int argc, char **argv) {
 	options_add(&options, "Ls", "storage-root", OPTION_HAS_VALUE, 0, JSON_NULL, NULL, NULL);
 	options_add(&options, "Ll", "lua-root", OPTION_HAS_VALUE, 0, JSON_NULL, NULL, NULL);
 	options_add(&options, "D", "debug", OPTION_NO_VALUE, 0, JSON_NULL, NULL, NULL);
-	options_add(&options, "256", "stacktracer", OPTION_NO_VALUE, 0, JSON_NULL, NULL, NULL);
-	options_add(&options, "257", "threadprofiler", OPTION_NO_VALUE, 0, JSON_NULL, NULL, NULL);
-	options_add(&options, "258", "debuglevel", OPTION_HAS_VALUE, 0, JSON_NULL, NULL, "[0-2]{1}");
-	// options_add(&options, 258, "memory-tracer", OPTION_NO_VALUE, 0, JSON_NULL, NULL, NULL);
+#if defined(DEBUG) && !defined(__mips__) && !defined(__aarch64__)
+	options_add(&options, "255", "heaptrack", OPTION_NO_VALUE, 0, JSON_NULL, NULL, NULL);
+#endif
 
 	if(options_parse(options, argc, argv, 1) == -1) {
 		show_default = 1;
@@ -2692,26 +3141,13 @@ int start_pilight(int argc, char **argv) {
 		nodaemon = 1;
 	}
 
-	if(options_exists(options, "257") == 0) {
-		threadprofiler = 1;
-		verbosity = LOG_ERR;
-		verbosity_changed = 1;
-		nodaemon = 1;
+#if defined(DEBUG) && !defined(__mips__) && !defined(__aarch64__)
+	if(options_exists(options, "255") == 0) {
+		if(options_get_number(options, "255", &heaptracker) == 0) {
+			heaptracker = 1;
+		}
 	}
-
-	if(options_exists(options, "256") == 0) {
-		verbosity = LOG_STACK;
-		verbosity_changed = 1;
-		stacktracer = 1;
-		nodaemon = 1;
-	}
-
-	if(options_exists(options, "258") == 0) {
-		options_get_number(options, "258", &pilight.debuglevel);
-		nodaemon = 1;
-		verbosity = LOG_DEBUG;
-		verbosity_changed = 1;
-	}
+#endif
 
 	if(show_help == 1) {
 		char help[1024];
@@ -2736,10 +3172,7 @@ int start_pilight(int argc, char **argv) {
 									"\n"
 									"\t -Ls --storage-root=xxxx\tlocation of the storage lua modules\n"
 									"\t -Ll --lua-root=xxxx\t\tlocation of the plain lua modules\n"
-									"\n"
-									/*"\t     --stacktracer\t\tshow internal function calls\n"
-									"\t     --threadprofiler\t\tshow per thread cpu usage\n"
-									"\t     --debuglevel\t\tshow additional development info\n"*/,
+									"\n",
 									progname, tabs, tabs, tabs, tabs, tabs);
 #ifdef _WIN32
 		MessageBox(NULL, help, "pilight :: info", MB_OK);
@@ -2890,6 +3323,8 @@ int start_pilight(int argc, char **argv) {
 		return EXIT_FAILURE;
 	}
 
+	signal(SIGPIPE, SIG_IGN);
+
 	eventpool_init(EVENTPOOL_THREADED);
 	protocol_init();
 	config_init();
@@ -3038,6 +3473,16 @@ int start_pilight(int argc, char **argv) {
 	}
 #endif
 
+#ifdef MQTT
+	{
+		struct lua_state_t *state = plua_get_free_state();
+		config_setting_get_number(state->L, "mqtt-enable", 0, &mqtt_enable);
+		config_setting_get_number(state->L, "mqtt-port", 0, &mqtt_port);
+		assert(plua_check_stack(state->L, 0) == 0);
+		plua_clear_state(state);
+	}
+#endif
+
 #ifndef _WIN32
 
 	{
@@ -3100,7 +3545,26 @@ int start_pilight(int argc, char **argv) {
 #endif
 
 	{
-		int mingaplen = 5100, maxgaplen = 10000, minrawlen = 1000, maxrawlen = 0;
+		double mingaplen = 5100, maxgaplen = 10000, minrawlen = 1000, maxrawlen = 0;
+		int hasmingaplen = 0, hasmaxgaplen = 0, hasminrawlen = 0, hasmaxrawlen = 0;
+
+		struct plua_metatable_t *table = config_get_metatable();
+		if(plua_metatable_get_number(table, "registry.hardware.RF433.mingaplen", &mingaplen) == 0) {
+			hasmingaplen = 1;
+			mingaplen = 5100;
+		}
+		if(plua_metatable_get_number(table, "registry.hardware.RF433.maxgaplen", &maxgaplen) == 0) {
+			hasmaxgaplen = 1;
+			maxgaplen = 10000;
+		}
+		if(plua_metatable_get_number(table, "registry.hardware.RF433.minrawlen", &minrawlen) == 0) {
+			hasminrawlen = 1;
+			minrawlen = 1000;
+		}
+		if(plua_metatable_get_number(table, "registry.hardware.RF433.maxrawlen", &maxrawlen) == 0) {
+			hasmaxrawlen = 1;
+			maxrawlen = 0;
+		}
 
 		struct protocols_t *tmp = protocols;
 		while(tmp) {
@@ -3123,11 +3587,18 @@ int start_pilight(int argc, char **argv) {
 			tmp = tmp->next;
 		}
 
-		struct plua_metatable_t *table = config_get_metatable();
-		plua_metatable_set_number(table, "registry.hardware.RF433.mingaplen", mingaplen);
-		plua_metatable_set_number(table, "registry.hardware.RF433.maxgaplen", maxgaplen);
-		plua_metatable_set_number(table, "registry.hardware.RF433.minrawlen", minrawlen);
-		plua_metatable_set_number(table, "registry.hardware.RF433.maxrawlen", maxrawlen);
+		if(hasmingaplen == 0) {
+			plua_metatable_set_number(table, "registry.hardware.RF433.mingaplen", mingaplen);
+		}
+		if(hasmaxgaplen == 0) {
+			plua_metatable_set_number(table, "registry.hardware.RF433.maxgaplen", maxgaplen);
+		}
+		if(hasminrawlen == 0) {
+			plua_metatable_set_number(table, "registry.hardware.RF433.minrawlen", minrawlen);
+		}
+		if(hasmaxrawlen == 0) {
+			plua_metatable_set_number(table, "registry.hardware.RF433.maxrawlen", maxrawlen);
+		}
 	}
 
 	{
@@ -3226,6 +3697,20 @@ int start_pilight(int argc, char **argv) {
 	threads_register("sender", &send_code, (void *)NULL, 0);
 	threads_register("broadcaster", &broadcast, (void *)NULL, 0);
 
+#ifdef MQTT
+	{
+		if(mqtt_enable == 1) {
+			eventpool_callback(REASON_MQTT_CLIENT_REMOVED, mqtt_client_remove_cb, NULL);
+
+			struct lua_state_t *state = plua_get_free_state();
+			config_setting_get_number(state->L, "mqtt_port", 0, &mqtt_port);
+			assert(plua_check_stack(state->L, 0) == 0);
+			plua_clear_state(state);
+			mqtt_server(mqtt_port);
+		}
+	}
+#endif
+
 	if(config_hardware_run() == -1) {
 		logprintf(LOG_NOTICE, "there are no hardware modules configured");
 	}
@@ -3294,6 +3779,21 @@ int start_pilight(int argc, char **argv) {
 	}
 	uv_timer_init(uv_default_loop(), timer_stats_req);
 	uv_timer_start(timer_stats_req, pilight_stats, 1000, 3000);
+
+#ifdef MQTT
+	{
+		if(mqtt_enable == 1) {
+			if((mqtt_publish_req = MALLOC(sizeof(uv_async_t))) == NULL) {
+				OUT_OF_MEMORY
+			}
+			uv_async_init(uv_default_loop(), mqtt_publish_req, mqtt_safe_publish);
+			uv_mutex_init(&mqtt_publish_lock);
+
+			mqtt_client("127.0.0.1", mqtt_port, "pilight-daemon", NULL, NULL, mqtt_callback, NULL);
+		}
+	}
+#endif
+
 	return EXIT_SUCCESS;
 
 clear:
@@ -3467,6 +3967,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdline, int show) {
 }
 #else
 int main(int argc, char **argv) {
+#ifdef DEBUG
+	btstate = backtrace_create_state(argv[0], BACKTRACE_SUPPORTS_THREADS, NULL, NULL);
+#endif
 	pilight.running = 0;
 	pilight.debuglevel = 0;
 

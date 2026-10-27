@@ -17,6 +17,7 @@
 #include <limits.h>
 #include <assert.h>
 #include <setjmp.h>
+#include <sys/syscall.h>
 
 #ifndef _WIN32
 	#include <libgen.h>
@@ -278,7 +279,6 @@ struct lua_state_t *plua_get_module(lua_State *L, char *namespace, char *module)
 	lua_pop(L, -1);
 
 	assert(plua_check_stack(L, 0) == 0);
-
 	return NULL;
 }
 
@@ -330,7 +330,8 @@ static int plua_metatable_push(lua_State *L, struct plua_metatable_t *node) {
 
 	luaL_argcheck(L,
 		((lua_type(L, -1) == LUA_TSTRING) || (lua_type(L, -1) == LUA_TNUMBER) ||
-		 (lua_type(L, -1) == LUA_TTABLE || (lua_type(L, -1) == LUA_TBOOLEAN))),
+		 (lua_type(L, -1) == LUA_TTABLE || (lua_type(L, -1) == LUA_TBOOLEAN)) ||
+		 (lua_type(L, -1) == LUA_TLIGHTUSERDATA)),
 		1, buf);
 
 	int max = 0, x = 0;
@@ -369,6 +370,11 @@ static int plua_metatable_push(lua_State *L, struct plua_metatable_t *node) {
 				OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
 			};
 			node->table[idx].val.type_ = LUA_TSTRING;
+		} break;
+		case LUA_TLIGHTUSERDATA: {
+			node->table[idx].val.void_ = lua_touserdata(L, -1);
+			node->table[idx].val.type_ = LUA_TLIGHTUSERDATA;
+			atomic_inc(((struct plua_interface_t *)node->table[idx].val.void_)->ref);
 		} break;
 		case LUA_TTABLE: {
 			int is_metatable = 0;
@@ -463,6 +469,10 @@ static int plua_metatable_pop(lua_State *L, struct plua_metatable_t *node) {
 			lua_pushstring(L, node->table[maxidx].val.string_);
 			FREE(node->table[maxidx].val.string_);
 		} break;
+		case LUA_TLIGHTUSERDATA: {
+			lua_pushlightuserdata(L, node->table[maxidx].val.void_);
+			atomic_dec(((struct plua_interface_t *)node->table[maxidx].val.void_)->ref);
+		} break;
 		case LUA_TTABLE: {
 			push_plua_metatable(L, (struct plua_metatable_t *)node->table[maxidx].val.void_);
 			plua_gc_reg(L, node->table[maxidx].val.void_, plua_metatable_unref);
@@ -485,6 +495,7 @@ static int plua_metatable_pop(lua_State *L, struct plua_metatable_t *node) {
 				node->table[i].val.string_ = node->table[i+1].val.string_;
 				node->table[i].val.type_ = node->table[i+1].val.type_;
 			} break;
+			case LUA_TLIGHTUSERDATA:
 			case LUA_TTABLE: {
 				node->table[i].val.void_ = node->table[i+1].val.void_;
 				node->table[i].val.type_ = node->table[i+1].val.type_;
@@ -562,6 +573,10 @@ static int plua_metatable_unshift(lua_State *L, struct plua_metatable_t *node) {
 				lua_pushstring(L, node->table[minidx].val.string_);
 				FREE(node->table[minidx].val.string_);
 			} break;
+			case LUA_TLIGHTUSERDATA: {
+				lua_pushlightuserdata(L, node->table[minidx].val.void_);
+				atomic_dec(((struct plua_interface_t *)node->table[minidx].val.void_)->ref);
+			} break;
 			case LUA_TTABLE: {
 				push_plua_metatable(L, (struct plua_metatable_t *)node->table[minidx].val.void_);
 				plua_gc_reg(L, node->table[minidx].val.void_, plua_metatable_unref);
@@ -584,6 +599,7 @@ static int plua_metatable_unshift(lua_State *L, struct plua_metatable_t *node) {
 					node->table[i].val.string_ = node->table[i+1].val.string_;
 					node->table[i].val.type_ = node->table[i+1].val.type_;
 				} break;
+				case LUA_TLIGHTUSERDATA:
 				case LUA_TTABLE: {
 					node->table[i].val.void_ = node->table[i+1].val.void_;
 					node->table[i].val.type_ = node->table[i+1].val.type_;
@@ -644,7 +660,8 @@ static int plua_metatable_shift(lua_State *L, struct plua_metatable_t *node) {
 
 	luaL_argcheck(L,
 		((lua_type(L, -1) == LUA_TSTRING) || (lua_type(L, -1) == LUA_TNUMBER) ||
-		 (lua_type(L, -1) == LUA_TTABLE || (lua_type(L, -1) == LUA_TBOOLEAN))),
+		 (lua_type(L, -1) == LUA_TTABLE || (lua_type(L, -1) == LUA_TBOOLEAN)) ||
+		 (lua_type(L, -1) == LUA_TLIGHTUSERDATA)),
 		1, buf);
 
 	int x = 0, i = 0;
@@ -690,6 +707,12 @@ static int plua_metatable_shift(lua_State *L, struct plua_metatable_t *node) {
 				OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
 			};
 			node->table[idx].val.type_ = LUA_TSTRING;
+		} break;
+		case LUA_TLIGHTUSERDATA: {
+			node->table[idx].val.void_ = lua_touserdata(L, -1);
+			node->table[idx].val.type_ = LUA_TLIGHTUSERDATA;
+
+			atomic_inc(((struct plua_interface_t *)node->table[idx].val.void_)->ref);
 		} break;
 		case LUA_TTABLE: {
 			int is_metatable = 0;
@@ -745,7 +768,11 @@ static int plua_metatable___shift(lua_State *L) {
 }
 
 void push__plua_metatable(lua_State *L, struct plua_interface_t *table) {
-	uv_sem_post(table->table->ref);
+	if(table->table->type != PLUA_TABLE) {
+		luaL_error(L, "table object required but %s object passed", plua_interface_to_string(table->table->type));
+	}
+
+	atomic_inc(table->table->ref);
 
 	plua_gc_reg(L, table->table, plua_metatable_unref);
 
@@ -822,7 +849,11 @@ void push__plua_metatable(lua_State *L, struct plua_interface_t *table) {
 }
 
 void push_plua_metatable(lua_State *L, struct plua_metatable_t *table) {
-	uv_sem_post(table->ref);
+	if(table->type != PLUA_TABLE) {
+		luaL_error(L, "table object required but %s object passed", plua_interface_to_string(table->type));
+	}
+
+	atomic_inc(table->ref);
 
 	plua_gc_reg(L, table, plua_metatable_unref);
 
@@ -929,14 +960,14 @@ static int plua_metatable___metatable(lua_State *L) {
 }
 
 void plua_metatable_free(struct plua_metatable_t *table) {
-	int x = 0, y = 0;
+	int x = 0;
 
-	uv_mutex_lock(&table->lock);
-	if(table->ref != NULL) {
-		y = uv_sem_trywait(table->ref);
-	}
-
-	if((table->ref == NULL) || (y == UV__EAGAIN)) {
+	if(atomic_dec(table->ref) == 0) {
+		assert(table->ref == 0);
+		/*
+		 * There are no more references so no need to lock
+		 */
+		// uv_mutex_lock(&table->lock);
 		for(x=0;x<table->nrvar;x++) {
 			uv_mutex_lock(&table->table[x].lock);
 			if(table->table[x].val.type_ == LUA_TSTRING) {
@@ -944,6 +975,12 @@ void plua_metatable_free(struct plua_metatable_t *table) {
 			}
 			if(table->table[x].key.type_ == LUA_TSTRING) {
 				FREE(table->table[x].key.string_);
+			}
+			if(table->table[x].val.type_ == LUA_TLIGHTUSERDATA) {
+				void (*gc)(void *data) = ((struct plua_interface_t *)table->table[x].val.void_)->gc;
+				if(gc != NULL) {
+					gc(table->table[x].val.void_);
+				}
 			}
 			if(table->table[x].val.type_ == LUA_TTABLE) {
 				plua_metatable_free(table->table[x].val.void_);
@@ -953,14 +990,9 @@ void plua_metatable_free(struct plua_metatable_t *table) {
 		if(table->table != NULL) {
 			FREE(table->table);
 		}
-		if(table->ref != NULL) {
-			FREE(table->ref);
-		}
-		uv_mutex_unlock(&table->lock);
+		// uv_mutex_unlock(&table->lock);
 		uv_mutex_destroy(&table->lock);
 		FREE(table);
-	} else {
-		uv_mutex_unlock(&table->lock);
 	}
 }
 
@@ -998,8 +1030,8 @@ void plua_metatable_clone(struct plua_metatable_t **src, struct plua_metatable_t
 
 	plua_metatable_init(&(*dst));
 
-	uv_mutex_lock(&(*dst)->lock);
 	uv_mutex_lock(&a->lock);
+	uv_mutex_lock(&(*dst)->lock);
 
 	if(((*dst)->table = MALLOC(sizeof(*a->table)*(a->nrvar))) == NULL) {
 		OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
@@ -1071,6 +1103,9 @@ static int plua_metatable_next(lua_State *L, struct plua_metatable_t *node) {
 			} break;
 			case LUA_TSTRING: {
 				lua_pushstring(L, node->table[iter].val.string_);
+			} break;
+			case LUA_TLIGHTUSERDATA: {
+				lua_pushlightuserdata(L, node->table[iter].val.void_);
 			} break;
 			case LUA_TTABLE: {
 				push_plua_metatable(L, (struct plua_metatable_t *)node->table[iter].val.void_);
@@ -1208,24 +1243,35 @@ static int plua_metatable_index(lua_State *L, struct plua_metatable_t *node) {
 		if(match == 1) {
 			switch(node->table[x].val.type_) {
 				case LUA_TBOOLEAN: {
+					uv_mutex_unlock(&node->lock);
+
 					lua_pushboolean(L, node->table[x].val.number_);
 				} break;
 				case LUA_TNUMBER: {
+					uv_mutex_unlock(&node->lock);
+
 					lua_pushnumber(L, node->table[x].val.number_);
 				} break;
 				case LUA_TSTRING: {
+					uv_mutex_unlock(&node->lock);
+
 					lua_pushstring(L, node->table[x].val.string_);
 				} break;
+				case LUA_TLIGHTUSERDATA: {
+					uv_mutex_unlock(&node->lock);
+					lua_pushlightuserdata(L, node->table[x].val.void_);
+				} break;
 				case LUA_TTABLE: {
+					uv_mutex_unlock(&node->lock);
 					push_plua_metatable(L, (struct plua_metatable_t *)node->table[x].val.void_);
 				} break;
 				default: {
+					uv_mutex_unlock(&node->lock);
 					lua_pushnil(L);
 				} break;
 			}
-			uv_mutex_unlock(&node->table[x].lock);
-			uv_mutex_unlock(&node->lock);
 
+			uv_mutex_unlock(&node->table[x].lock);
 			return 1;
 		}
 		uv_mutex_unlock(&node->table[x].lock);
@@ -1268,7 +1314,8 @@ void plua_metatable_parse_set(lua_State *L, void *data) {
 
 	luaL_argcheck(L,
 		((lua_type(L, -1) == LUA_TSTRING) || (lua_type(L, -1) == LUA_TNUMBER) ||
-		(lua_type(L, -1) == LUA_TNIL) || (lua_type(L, -1) == LUA_TBOOLEAN) || (lua_type(L, -1) == LUA_TTABLE)),
+		(lua_type(L, -1) == LUA_TNIL) || (lua_type(L, -1) == LUA_TBOOLEAN) ||
+		(lua_type(L, -1) == LUA_TTABLE) || lua_type(L, -1) == LUA_TLIGHTUSERDATA),
 		1, buf);
 
 	sprintf(p, error2, lua_typename(L, lua_type(L, -2)));
@@ -1278,7 +1325,6 @@ void plua_metatable_parse_set(lua_State *L, void *data) {
 		1, buf);
 
 	uv_mutex_lock(&node->lock);
-
 	for(x=0;x<node->nrvar;x++) {
 		uv_mutex_lock(&node->table[x].lock);
 		switch(lua_type(L, -2)) {
@@ -1295,6 +1341,7 @@ void plua_metatable_parse_set(lua_State *L, void *data) {
 				}
 			} break;
 		}
+
 		if(match == 1) {
 			switch(lua_type(L, -1)) {
 				case LUA_TBOOLEAN: {
@@ -1303,6 +1350,12 @@ void plua_metatable_parse_set(lua_State *L, void *data) {
 					}
 					if(node->table[x].val.type_ == LUA_TTABLE) {
 						plua_metatable_free(node->table[x].val.void_);
+					}
+					if(node->table[x].val.type_ == LUA_TLIGHTUSERDATA) {
+						void (*gc)(void *data) = ((struct plua_interface_t *)node->table[x].val.void_)->gc;
+						if(gc != NULL) {
+							gc(node->table[x].val.void_);
+						}
 					}
 					node->table[x].val.number_ = lua_toboolean(L, -1);
 					node->table[x].val.type_ = LUA_TBOOLEAN;
@@ -1316,6 +1369,12 @@ void plua_metatable_parse_set(lua_State *L, void *data) {
 					if(node->table[x].val.type_ == LUA_TTABLE) {
 						plua_metatable_free(node->table[x].val.void_);
 					}
+					if(node->table[x].val.type_ == LUA_TLIGHTUSERDATA) {
+						void (*gc)(void *data) = ((struct plua_interface_t *)node->table[x].val.void_)->gc;
+						if(gc != NULL) {
+							gc(node->table[x].val.void_);
+						}
+					}
 					node->table[x].val.number_ = lua_tonumber(L, -1);
 					node->table[x].val.type_ = LUA_TNUMBER;
 
@@ -1328,10 +1387,35 @@ void plua_metatable_parse_set(lua_State *L, void *data) {
 					if(node->table[x].val.type_ == LUA_TTABLE) {
 						plua_metatable_free(node->table[x].val.void_);
 					}
+					if(node->table[x].val.type_ == LUA_TLIGHTUSERDATA) {
+						void (*gc)(void *data) = ((struct plua_interface_t *)node->table[x].val.void_)->gc;
+						if(gc != NULL) {
+							gc(node->table[x].val.void_);
+						}
+					}
 					if((node->table[x].val.string_ = STRDUP((char *)lua_tostring(L, -1))) == NULL) {
 						OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
 					}
 					node->table[x].val.type_ = LUA_TSTRING;
+
+					uv_mutex_unlock(&node->table[x].lock);
+				} break;
+				case LUA_TLIGHTUSERDATA: {
+					if(node->table[x].val.type_ == LUA_TSTRING) {
+						FREE(node->table[x].val.string_);
+					}
+					if(node->table[x].val.type_ == LUA_TTABLE) {
+						plua_metatable_free(node->table[x].val.void_);
+					}
+					if(node->table[x].val.type_ == LUA_TLIGHTUSERDATA) {
+						void (*gc)(void *data) = ((struct plua_interface_t *)node->table[x].val.void_)->gc;
+						if(gc != NULL) {
+							gc(node->table[x].val.void_);
+						}
+					}
+					node->table[x].val.void_ = lua_touserdata(L, -1);
+
+					atomic_inc(((struct plua_interface_t *)node->table[x].val.void_)->ref);
 
 					uv_mutex_unlock(&node->table[x].lock);
 				} break;
@@ -1342,6 +1426,12 @@ void plua_metatable_parse_set(lua_State *L, void *data) {
 					}
 					if(node->table[x].val.type_ == LUA_TTABLE) {
 						plua_metatable_free(node->table[x].val.void_);
+					}
+					if(node->table[x].val.type_ == LUA_TLIGHTUSERDATA) {
+						void (*gc)(void *data) = ((struct plua_interface_t *)node->table[x].val.void_)->gc;
+						if(gc != NULL) {
+							gc(node->table[x].val.void_);
+						}
 					}
 					node->table[x].val.void_ = NULL;
 
@@ -1384,7 +1474,14 @@ void plua_metatable_parse_set(lua_State *L, void *data) {
 					if(node->table[x].val.type_ == LUA_TSTRING) {
 						FREE(node->table[x].val.string_);
 					}
+					if(node->table[x].val.type_ == LUA_TLIGHTUSERDATA) {
+						void (*gc)(void *data) = ((struct plua_interface_t *)node->table[x].val.void_)->gc;
+						if(gc != NULL) {
+							gc(node->table[x].val.void_);
+						}
+					}
 					if(node->table[x].val.type_ == LUA_TTABLE) {
+						uv_mutex_unlock(&node->table[x].lock);
 						plua_metatable_free(node->table[x].val.void_);
 						if(node->nrvar == 0) {
 							FREE(node->table);
@@ -1404,6 +1501,7 @@ void plua_metatable_parse_set(lua_State *L, void *data) {
 									node->table[i].val.string_ = node->table[i+1].val.string_;
 									node->table[i].val.type_ = node->table[i+1].val.type_;
 								} break;
+								case LUA_TLIGHTUSERDATA:
 								case LUA_TTABLE: {
 									node->table[i].val.void_ = node->table[i+1].val.void_;
 									node->table[i].val.type_ = node->table[i+1].val.type_;
@@ -1428,8 +1526,9 @@ void plua_metatable_parse_set(lua_State *L, void *data) {
 			}
 
 			break;
+		} else {
+			uv_mutex_unlock(&node->table[x].lock);
 		}
-		uv_mutex_unlock(&node->table[x].lock);
 	}
 
 	if(node != NULL) {
@@ -1453,6 +1552,12 @@ void plua_metatable_parse_set(lua_State *L, void *data) {
 						OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
 					};
 					node->table[idx].val.type_ = LUA_TSTRING;
+				} break;
+				case LUA_TLIGHTUSERDATA: {
+					node->table[idx].val.void_ = lua_touserdata(L, -1);
+					node->table[idx].val.type_ = LUA_TLIGHTUSERDATA;
+
+					atomic_inc(((struct plua_interface_t *)node->table[x].val.void_)->ref);
 				} break;
 				case LUA_TTABLE: {
 					int is_metatable = 0;
@@ -1541,9 +1646,13 @@ struct lua_state_t *plua_get_free_state(void) {
 	int i = 0;
 	int error = 0;
 
+	if(init == 0) {
+		return NULL;
+	}
+
 	while(1) {
 		for(i=0;i<NRLUASTATES;i++) {
-			if(uv_mutex_trylock(&lua_state[i].lock) == 0) {
+			if(__sync_bool_compare_and_swap(&lua_state[i].claimed, 0, 1)) {
 				return &lua_state[i];
 			}
 		}
@@ -1566,20 +1675,45 @@ struct lua_state_t *plua_get_current_state(lua_State *L) {
 	return NULL;
 }
 
-void _plua_clear_state(struct lua_state_t *state, char *file, int line) {
-	int i = 0;
-	uv_mutex_lock(&state->gc.lock);
-	for(i=0;i<state->gc.nr;i++) {
-		if(state->gc.list[i]->free == 0) {
-			state->gc.list[i]->callback(state->gc.list[i]->ptr);
-		}
-		FREE(state->gc.list[i]);
+static int __sync_val_compare_and_swap1(int *ptr, int oldval, int newval) {
+	for(;;) {
+		int success = __sync_bool_compare_and_swap(ptr, oldval, newval);
+		if(success)
+			return oldval;
+		int tmp = *ptr;
+		__sync_synchronize();
+		if(tmp != oldval)
+			return tmp;
 	}
-	if(state->gc.size > 0) {
-		FREE(state->gc.list);
+}
+
+void _plua_clear_state(struct lua_state_t *state, char *file, int line) {
+	int i = 0, x = 0;
+
+	// uv_mutex_lock(&state->gc.lock);
+
+	while(!__sync_bool_compare_and_swap(&state->claimed, 1, 2));
+
+	if(state->idx < NRLUASTATES+1) {
+		if(state->gc.threadid == -1) {
+			state->gc.threadid = syscall(__NR_gettid);
+		}
+
+		assert(state->gc.threadid == syscall(__NR_gettid));
+		state->gc.threadid = -1;
+	}
+
+	while(!__sync_bool_compare_and_swap(&state->gc.claimed, 0, 1));
+	for(i=0;i<state->gc.nr;i++) {
+		x = __sync_val_compare_and_swap1(&state->gc.list[i]->free, state->gc.list[i]->free, 2);
+		while(atomic_dec(state->gc.list[i]->ref) >= 0) {
+			if(x == 0) {
+				state->gc.list[i]->callback(state->gc.list[i]->ptr);
+			}
+		}
 	}
 	state->gc.nr = 0;
-	state->gc.size = 0;
+	while(!__sync_bool_compare_and_swap(&state->gc.claimed, 1, 0));
 
 	state->oldmod = state->module;
 	if(state->oldmod != NULL) {
@@ -1587,13 +1721,26 @@ void _plua_clear_state(struct lua_state_t *state, char *file, int line) {
 		state->oldmod->btline = line;
 	}
 
-	uv_mutex_unlock(&state->gc.lock);
+	// uv_mutex_unlock(&state->gc.lock);
 
 	if(state->L != NULL) {
 		assert(plua_check_stack(state->L, 0) == 0);
 	}
 
-	uv_mutex_unlock(&state->lock);
+	state->error.set = 0;
+	state->error.level = 0;
+	state->error.line = -1;
+	if(state->error.file != NULL) {
+		FREE(state->error.file);
+	}
+	state->error.file = NULL;
+
+	/*
+	 * Make sure the unlock doesn't call on a unlocked lock
+	 */
+
+	while(!__sync_bool_compare_and_swap(&state->claimed, 2, 0));
+
 	uv_sem_post(&sem_used_states);
 }
 
@@ -2250,13 +2397,24 @@ static int plua_atpanic(lua_State *L) {
 	struct lua_state_t *state = plua_get_current_state(L);
 
 	if(state != NULL) {
-		if(state->file != NULL && state->line != -1) {
-			logprintf(LOG_ERR, "(%s #%d) Lua panic (#%d): %s", state->file, state->line, state->idx, lua_tostring(L, -1));
+		if(state->error.set == 1) {
+			/*
+			 * No need to panic :)
+			 */
+			while(lua_gettop(L) > 0) {
+				lua_remove(L, -1);
+			}
+			longjmp(state->jmp, state->idx);
+			return 0;
 		} else {
-			logprintf(LOG_ERR, "Lua panic (#%d): %s", state->idx, lua_tostring(L, -1));
+			if(state->file != NULL && state->line != -1) {
+				logprintf(LOG_ERR, "(%s #%d) Lua panic (#%d): %s", state->file, state->line, state->idx, lua_tostring(L, -1));
+			} else {
+				logprintf(LOG_ERR, "Lua panic (#%d): %s", state->idx, lua_tostring(L, -1));
+			}
+			state->file = NULL;
+			state->line = -1;
 		}
-		state->file = NULL;
-		state->line = -1;
 	} else {
 		logprintf(LOG_ERR, "Lua panic: %s", lua_tostring(L, -1));
 	}
@@ -2281,13 +2439,16 @@ void plua_init(void) {
 	}
 	init = 1;
 
-	uv_sem_init(&sem_used_states, 0);
+	uv_sem_init(&sem_used_states, 4);
 
 	int i = 0;
 	for(i=0;i<NRLUASTATES+1;i++) {
 		memset(&lua_state[i], 0, sizeof(struct lua_state_t));
-		uv_mutex_init(&lua_state[i].lock);
-		uv_mutex_init(&lua_state[i].gc.lock);
+		lua_state[i].claimed = 0;
+		// uv_mutex_init(&lua_state[i].lock);
+		// uv_mutex_init(&lua_state[i].gc.lock);
+		lua_state[i].gc.threadid = -1;
+		lua_state[i].gc.claimed = 0;
 
 		lua_State *L = luaL_newstate();
 
@@ -2299,6 +2460,11 @@ void plua_init(void) {
 		lua_state[i].line = -1;
 
 		lua_atpanic(L, &plua_atpanic);
+		int jmp = setjmp(lua_state[i].jmp);
+		if(jmp > 0) {
+			plua_clear_state(&lua_state[jmp]);
+			return;
+		}
 #ifdef PILIGHT_UNITTEST
 		lua_sethook(L, hook, LUA_MASKLINE, 0);
 #endif
@@ -2313,7 +2479,8 @@ void plua_init(void) {
 	 */
 	i--;
 	memset(&lua_state[i], 0, sizeof(struct lua_state_t));
-	uv_mutex_init(&lua_state[i].gc.lock);
+	lua_state[i].gc.threadid = -1;
+	// uv_mutex_init(&lua_state[i].gc.lock);
 }
 
 int plua_module_exists(char *module, int type) {
@@ -2323,6 +2490,7 @@ int plua_module_exists(char *module, int type) {
 	if(state == NULL) {
 		return 1;
 	}
+
 	if((L = state->L) == NULL) {
 		plua_clear_state(state);
 		return 1;
@@ -2369,19 +2537,44 @@ void plua_gc_unreg(lua_State *L, void *ptr) {
 	}
 	assert(state != NULL);
 
-	uv_mutex_lock(&state->gc.lock);
+	if(L != NULL) {
+		__sync_bool_compare_and_swap(&state->gc.threadid, -1, syscall(__NR_gettid));
+		assert(state->gc.threadid == syscall(__NR_gettid));
+	}
+
+	while(!__sync_bool_compare_and_swap(&state->gc.claimed, 0, 1)) {
+		/*
+		 * Unreg from within plua_gc
+		 */
+		if(state->gc.claimed == 2) {
+			while(!__sync_bool_compare_and_swap(&state->gc.claimed, 2, 3));
+			break;
+		}
+	}
+
 	int i = 0;
 	for(i=0;i<state->gc.nr;i++) {
 		if(state->gc.list[i] != NULL) {
-			if(state->gc.list[i]->free == 0 &&
-				 state->gc.list[i]->ptr == ptr) {
-				memset(state->gc.list[i], 0, sizeof(**state->gc.list));
-				state->gc.list[i]->free = 1;
-				break;
+			if(__sync_bool_compare_and_swap(&state->gc.list[i]->free, 0, 2)) {
+				if(state->gc.list[i]->ptr == ptr) {
+					if(atomic_dec(state->gc.list[i]->ref) == 0) {
+						__sync_bool_compare_and_swap(&state->gc.list[i]->free, 2, 1);
+					}
+					break;
+				}
+				__sync_bool_compare_and_swap(&state->gc.list[i]->free, 2, 0);
 			}
 		}
 	}
-	uv_mutex_unlock(&state->gc.lock);
+	while(!__sync_bool_compare_and_swap(&state->gc.claimed, 1, 0)) {
+		/*
+		 * Unreg from within plua_gc
+		 */
+		if(state->gc.claimed == 3) {
+			while(!__sync_bool_compare_and_swap(&state->gc.claimed, 3, 2));
+			break;
+		}
+	}
 }
 
 void plua_gc_reg(lua_State *L, void *ptr, void (*callback)(void *ptr)) {
@@ -2394,11 +2587,26 @@ void plua_gc_reg(lua_State *L, void *ptr, void (*callback)(void *ptr)) {
 	}
 	assert(state != NULL);
 
-	uv_mutex_lock(&state->gc.lock);
+	if(L != NULL) {
+		__sync_bool_compare_and_swap(&state->gc.threadid, -1, syscall(__NR_gettid));
+		assert(state->gc.threadid == syscall(__NR_gettid));
+	}
+
+	while(!__sync_bool_compare_and_swap(&state->gc.claimed, 0, 1)) {
+		if(state->gc.claimed == 2) {
+			callback(ptr);
+			return;
+		}
+	}
+
 	int slot = -1, i = 0;
 	for(i=0;i<state->gc.nr;i++) {
-		if(state->gc.list[i]->free == 1) {
-			state->gc.list[i]->free = 0;
+		if(state->gc.list[i]->ptr == ptr && state->gc.list[i]->callback == callback) {
+			atomic_inc(state->gc.list[i]->ref);
+			while(!__sync_bool_compare_and_swap(&state->gc.claimed, 1, 0));
+			return;
+		}
+		if(__sync_bool_compare_and_swap(&state->gc.list[i]->free, 1, 0)) {
 			slot = i;
 			break;
 		}
@@ -2406,25 +2614,27 @@ void plua_gc_reg(lua_State *L, void *ptr, void (*callback)(void *ptr)) {
 
 	if(slot == -1) {
 		if(state->gc.size <= state->gc.nr) {
-			if((state->gc.list = REALLOC(state->gc.list, sizeof(**state->gc.list)*(state->gc.size+12))) == NULL) {
+			if((state->gc.list = REALLOC(state->gc.list, sizeof(*state->gc.list)*(state->gc.size+12))) == NULL) {
 				OUT_OF_MEMORY
 			}
-			memset(&state->gc.list[state->gc.size], 0, sizeof(**state->gc.list)*12);
 			state->gc.size += 12;
-		}
-		if(state->gc.list[state->gc.nr] == NULL) {
-			if((state->gc.list[state->gc.nr] = MALLOC(sizeof(**state->gc.list))) == NULL) {
-				OUT_OF_MEMORY
+
+			for(i=state->gc.nr;i<state->gc.size;i++) {
+				if((state->gc.list[i] = MALLOC(sizeof(**state->gc.list))) == NULL) {
+					OUT_OF_MEMORY
+				}
 			}
 		}
 		slot = state->gc.nr++;
 	}
 	memset(state->gc.list[slot], 0, sizeof(**state->gc.list));
 
+	state->gc.list[slot]->free = 0;
+	state->gc.list[slot]->ref = 1;
 	state->gc.list[slot]->ptr = ptr;
 	state->gc.list[slot]->callback = callback;
 
-	uv_mutex_unlock(&state->gc.lock);
+	while(!__sync_bool_compare_and_swap(&state->gc.claimed, 1, 0));
 }
 
 static unsigned int number2bitwise(unsigned int num) {
@@ -2484,7 +2694,7 @@ int plua_check_stack(lua_State *L, int numargs, ...) {
 void plua_override_global(char *name, int (*func)(lua_State *L)) {
 	int i = 0;
 	for(i=0;i<NRLUASTATES;i++) {
-		uv_mutex_lock(&lua_state[i].lock);
+		// uv_mutex_lock(&lua_state[i].lock);
 
 		lua_getglobal(lua_state[i].L, "_G");
 		lua_pushcfunction(lua_state[i].L, func);
@@ -2493,7 +2703,7 @@ void plua_override_global(char *name, int (*func)(lua_State *L)) {
 
 		assert(plua_check_stack(lua_state[i].L, 0) == 0);
 
-		uv_mutex_unlock(&lua_state[i].lock);
+		// uv_mutex_unlock(&lua_state[i].lock);
 	}
 }
 //#endif
@@ -2514,81 +2724,92 @@ int plua_get_method(struct lua_State *L, char *file, char *method) {
 static int plua_error_handler(lua_State* L) {
 	struct lua_state_t *state = plua_get_current_state(L);
 
-	lua_Debug ar;
-	int level = 0, p = 0;
-	int buffer = 4096;
-	char msg[buffer];
-	memset(&msg, 0, buffer);
-
 	const char *err = lua_tostring(L, -1);
-	p += snprintf(&msg[p], buffer-p, "\n---- LUA STACKTRACE ----\n");
-	p += snprintf(&msg[p], buffer-p, " error: %s\n", err);
-	lua_pop(L, 1);
+	if(state->error.set == 0 || state->error.level <= LOG_CRIT) {
+		lua_Debug ar;
+		int level = 0, p = 0;
+		int buffer = 4096;
+		char msg[buffer];
+		memset(&msg, 0, buffer);
 
-	if(state != NULL) {
-		if(state->file != NULL) {
-			p += snprintf(&msg[p], buffer-p, " file: %s #%d\n", state->file, state->line);
-		}
-		if(state->module != NULL && state->module->btfile != NULL) {
-			p += snprintf(&msg[p], buffer-p, " module: %s #%d\n", state->module->btfile, state->module->btline);
-		}
-	}
-	p += snprintf(&msg[p], buffer-p, "\n");
-	while(lua_getstack(L, level, &ar) == 1) {
-		lua_getinfo(L, "nSfLl", &ar);
+		p += snprintf(&msg[p], buffer-p, "\n---- LUA STACKTRACE ----\n");
+		p += snprintf(&msg[p], buffer-p, " error: %s\n", err);
 		lua_pop(L, 1);
-		p += snprintf(&msg[p], buffer-p, " [#%.3d] %s:%d ", level, ar.short_src, ar.currentline);
 
-		if(ar.name != 0) {
-			p += snprintf(&msg[p], buffer-p, " (%s %s)\n", ar.namewhat, ar.name);
-		} else {
-			p += snprintf(&msg[p], buffer-p, "\n");
-		}
-		level++;
-	}
-
-	p += snprintf(&msg[p], buffer-p, "\n");
-	p += snprintf(&msg[p], buffer-p, " number of element on stack: %d\n", lua_gettop(L));
-	p += snprintf(&msg[p], buffer-p, "\n");
-	int top = lua_gettop(L), i = 0;
-
-	for(i = 1; i <= top; i++) {
-		int t = lua_type(L, i);
-		switch(t) {
-			case LUA_TSTRING:
-				p += snprintf(&msg[p], buffer-p, " %d: '%s'", i, lua_tostring(L, i));
-			break;
-			case LUA_TBOOLEAN:
-				p += snprintf(&msg[p], buffer-p, " %d: %s", i, lua_toboolean(L, i) ? "true" : "false");
-			break;
-			case LUA_TNUMBER:
-				p += snprintf(&msg[p], buffer-p, " %d: %g", i, lua_tonumber(L, i));
-			break;
-			default:
-				p += snprintf(&msg[p], buffer-p, " %d: %s", i, lua_typename(L, t));
-			break;
+		if(state != NULL) {
+			if(state->file != NULL) {
+				p += snprintf(&msg[p], buffer-p, " file: %s #%d\n", state->file, state->line);
+			}
+			if(state->module != NULL && state->module->btfile != NULL) {
+				p += snprintf(&msg[p], buffer-p, " module: %s #%d\n", state->module->btfile, state->module->btline);
+			}
 		}
 		p += snprintf(&msg[p], buffer-p, "\n");
+
+		while(lua_getstack(L, level, &ar) == 1) {
+			lua_getinfo(L, "nSfLl", &ar);
+			lua_pop(L, 1);
+			p += snprintf(&msg[p], buffer-p, " [#%.3d] %s:%d ", level, ar.short_src, ar.currentline);
+
+			if(ar.name != 0) {
+				p += snprintf(&msg[p], buffer-p, " (%s %s)\n", ar.namewhat, ar.name);
+			} else {
+				p += snprintf(&msg[p], buffer-p, "\n");
+			}
+			level++;
+		}
+
+		p += snprintf(&msg[p], buffer-p, "\n");
+		p += snprintf(&msg[p], buffer-p, " number of element on stack: %d\n", lua_gettop(L));
+		p += snprintf(&msg[p], buffer-p, "\n");
+		int top = lua_gettop(L), i = 0;
+
+		for(i = 1; i <= top; i++) {
+			int t = lua_type(L, i);
+			switch(t) {
+				case LUA_TSTRING:
+					p += snprintf(&msg[p], buffer-p, " %d: '%s'", i, lua_tostring(L, i));
+				break;
+				case LUA_TBOOLEAN:
+					p += snprintf(&msg[p], buffer-p, " %d: %s", i, lua_toboolean(L, i) ? "true" : "false");
+				break;
+				case LUA_TNUMBER:
+					p += snprintf(&msg[p], buffer-p, " %d: %g", i, lua_tonumber(L, i));
+				break;
+				default:
+					p += snprintf(&msg[p], buffer-p, " %d: %s", i, lua_typename(L, t));
+				break;
+			}
+			p += snprintf(&msg[p], buffer-p, "\n");
+		}
+		p += snprintf(&msg[p], buffer-p, "\n---- LUA STACKTRACE ----");
+		lua_pushstring(L, msg);
+	} else {
+		lua_pushstring(L, err);
 	}
-	p += snprintf(&msg[p], buffer-p, "\n---- LUA STACKTRACE ----");
-	lua_pushstring(L, msg);
 	return 1;
 }
 
 int plua_pcall(struct lua_State *L, char *file, int args, int ret) {
+	struct lua_state_t *state = plua_get_current_state(L);
 	int hpos = lua_gettop(L) - args;
+
 	lua_pushcfunction(L, plua_error_handler);
 	lua_insert(L, hpos);
-
 	if(lua_pcall(L, args, ret, hpos) == LUA_ERRRUN) {
 		if(lua_type(L, -1) == LUA_TNIL) {
 			logprintf(LOG_ERR, "%s: syntax error", file);
 			lua_remove(L, -1);
 			lua_remove(L, -1);
-			return -1;
-		}
-		if(lua_type(L, -1) == LUA_TSTRING) {
-			logprintf(LOG_ERR, "%s", lua_tostring(L, -1));
+		} else if(lua_type(L, -1) == LUA_TSTRING) {
+			if(state->error.line == -1 || state->error.file == NULL || state->error.set == 0) {
+				logprintf(state->error.level, "%s", lua_tostring(L, -1));
+			} else {
+				_logprintf(state->error.level, (char *)state->error.file, state->error.line, lua_tostring(L, -1));
+			}
+			if(state->error.file != NULL) {
+				FREE(state->error.file);
+			}
 			if(ret == LUA_MULTRET) {
 				lua_remove(L, hpos);
 				lua_remove(L, -1);
@@ -2597,8 +2818,9 @@ int plua_pcall(struct lua_State *L, char *file, int args, int ret) {
 					lua_remove(L, -1);
 				}
 			}
-			return -1;
 		}
+		state->error.set = 0;
+		return -1;
 	}
 
 	lua_remove(L, hpos);
@@ -2666,6 +2888,11 @@ void plua_metatable_to_json(struct plua_metatable_t *table, struct JsonNode **jn
 				len = snprintf(key, len+1, "%g", (float)table->table[x].key.number_);
 
 				if(table->table[x].val.type_ == LUA_TSTRING) {
+					if(utf8_validate(table->table[x].val.string_) == 0) {
+						json_delete(*jnode);
+						*jnode = NULL;
+						return;
+					}
 					json_append_member(*jnode, key, json_mkstring(table->table[x].val.string_));
 				} else if(table->table[x].val.type_ == LUA_TBOOLEAN) {
 					json_append_member(*jnode, key, json_mkbool((int)table->table[x].val.number_));
@@ -2682,12 +2909,22 @@ void plua_metatable_to_json(struct plua_metatable_t *table, struct JsonNode **jn
 				} else if(table->table[x].val.type_ == LUA_TTABLE) {
 					struct JsonNode *jchild = NULL;
 					plua_metatable_to_json(table->table[x].val.void_, &jchild);
+					if(jchild == NULL) {
+						json_delete(*jnode);
+						*jnode = NULL;
+						return;
+					}
 					json_append_member(*jnode, key, jchild);
 				}
 
 				FREE(key);
 			} else {
 				if(table->table[x].val.type_ == LUA_TSTRING) {
+					if(utf8_validate(table->table[x].val.string_) == 0) {
+						json_delete(*jnode);
+						*jnode = NULL;
+						return;
+					}
 					json_append_element(*jnode, json_mkstring(table->table[x].val.string_));
 				} else if(table->table[x].val.type_ == LUA_TBOOLEAN) {
 					json_append_element(*jnode, json_mkbool((int)table->table[x].val.number_));
@@ -2705,14 +2942,29 @@ void plua_metatable_to_json(struct plua_metatable_t *table, struct JsonNode **jn
 				} else if(table->table[x].val.type_ == LUA_TTABLE) {
 					struct JsonNode *jchild = NULL;
 					plua_metatable_to_json(table->table[x].val.void_, &jchild);
+					if(jchild == NULL) {
+						json_delete(*jnode);
+						*jnode = NULL;
+						return;
+					}
 					json_append_element(*jnode, jchild);
 				}
 			}
 		} else if(table->table[x].key.type_ == LUA_TSTRING) {
 			if(mkobject == 1) {
 				if(table->table[x].val.type_ == LUA_TSTRING) {
+					if(utf8_validate(table->table[x].val.string_) == 0 || utf8_validate(table->table[x].key.string_) == 0) {
+						json_delete(*jnode);
+						*jnode = NULL;
+						return;
+					}
 					json_append_member(*jnode, table->table[x].key.string_, json_mkstring(table->table[x].val.string_));
 				} else if(table->table[x].val.type_ == LUA_TBOOLEAN) {
+					if(utf8_validate(table->table[x].key.string_) == 0) {
+						json_delete(*jnode);
+						*jnode = NULL;
+						return;
+					}
 					json_append_member(*jnode, table->table[x].key.string_, json_mkbool((int)table->table[x].val.number_));
 				} else if(table->table[x].val.type_ == LUA_TNUMBER) {
 					char *val = NULL;
@@ -2723,15 +2975,35 @@ void plua_metatable_to_json(struct plua_metatable_t *table, struct JsonNode **jn
 					memset(val, 0, len+1);
 					len = snprintf(val, len+1, "%g", (float)table->table[x].val.number_);
 
+					if(utf8_validate(table->table[x].key.string_) == 0) {
+						json_delete(*jnode);
+						*jnode = NULL;
+						return;
+					}
 					json_append_member(*jnode, table->table[x].key.string_, json_mknumber(table->table[x].val.number_, nrDecimals(val)));
 					FREE(val);
 				} else if(table->table[x].val.type_ == LUA_TTABLE) {
 					struct JsonNode *jchild = NULL;
+					if(utf8_validate(table->table[x].key.string_) == 0) {
+						json_delete(*jnode);
+						*jnode = NULL;
+						return;
+					}
 					plua_metatable_to_json(table->table[x].val.void_, &jchild);
+					if(jchild == NULL) {
+						json_delete(*jnode);
+						*jnode = NULL;
+						return;
+					}
 					json_append_member(*jnode, table->table[x].key.string_, jchild);
 				}
 			} else {
 				if(table->table[x].val.type_ == LUA_TSTRING) {
+					if(utf8_validate(table->table[x].key.string_) == 0) {
+						json_delete(*jnode);
+						*jnode = NULL;
+						return;
+					}
 					json_append_element(*jnode, json_mkstring(table->table[x].val.string_));
 				} else if(table->table[x].val.type_ == LUA_TBOOLEAN) {
 					json_append_element(*jnode, json_mkbool((int)table->table[x].val.number_));
@@ -2749,6 +3021,11 @@ void plua_metatable_to_json(struct plua_metatable_t *table, struct JsonNode **jn
 				} else if(table->table[x].val.type_ == LUA_TTABLE) {
 					struct JsonNode *jchild = NULL;
 					plua_metatable_to_json(table->table[x].val.void_, &jchild);
+					if(jchild == NULL) {
+						json_delete(*jnode);
+						*jnode = NULL;
+						return;
+					}
 					json_append_element(*jnode, jchild);
 				}
 			}
@@ -2792,6 +3069,7 @@ int plua_gc(void) {
 	if(init == 0) {
 		return -1;
 	}
+	init = 0;
 	struct plua_module_t *tmp = NULL;
 	while(modules) {
 		tmp = modules;
@@ -2803,15 +3081,23 @@ int plua_gc(void) {
 		FREE(tmp);
 	}
 
-	int i = 0, x = 0, _free = 1;
+	int i = 0, x = 0, y = 0, _free = 1;
 	while(_free) {
 		_free = 0;
 		for(i=0;i<NRLUASTATES+1;i++) {
-			if(uv_mutex_trylock(&lua_state[i].lock) == 0) {
+			if(__sync_bool_compare_and_swap(&lua_state[i].claimed, 0, 3)) {
+				while(!__sync_bool_compare_and_swap(&lua_state[i].gc.claimed, 0, 2));
 				for(x=0;x<lua_state[i].gc.nr;x++) {
-					if(lua_state[i].gc.list[x]->free == 0) {
-						lua_state[i].gc.list[x]->callback(lua_state[i].gc.list[x]->ptr);
+					y = __sync_val_compare_and_swap1(&lua_state[i].gc.list[x]->free, lua_state[i].gc.list[x]->free, 2);
+					//__sync_bool_compare_and_swap(&lua_state[i].gc.list[x]->free, lua_state[i].gc.list[x]->free, 3);
+					while(atomic_dec(lua_state[i].gc.list[x]->ref) >= 0) {
+						if(y == 0) {
+							lua_state[i].gc.list[x]->callback(lua_state[i].gc.list[x]->ptr);
+						}
 					}
+					FREE(lua_state[i].gc.list[x]);
+				}
+				for(x=lua_state[i].gc.nr;x<lua_state[i].gc.size;x++) {
 					FREE(lua_state[i].gc.list[x]);
 				}
 				if(lua_state[i].gc.size > 0) {
@@ -2825,14 +3111,13 @@ int plua_gc(void) {
 					lua_close(lua_state[i].L);
 					lua_state[i].L = NULL;
 				}
-				uv_mutex_unlock(&lua_state[i].lock);
-			} else {
+				// uv_mutex_unlock(&lua_state[i].lock);
+			} else if(!__sync_bool_compare_and_swap(&lua_state[i].claimed, 3, 3)) {
 				_free = 1;
 			}
 		}
 	}
 
-	init = 0;
 	logprintf(LOG_DEBUG, "garbage collected lua library");
 	return 0;
 }
@@ -2913,6 +3198,100 @@ int plua_flush_coverage(void) {
 	return 0;
 }
 #endif
+
+char *plua_interface_to_string(int i) {
+	switch(i) {
+		case PLUA_TABLE: {
+			return "table";
+		} break;
+		case PLUA_TIMER: {
+			return "timer";
+		} break;
+		case PLUA_THREAD: {
+			return "thread";
+		} break;
+		case PLUA_MQTT: {
+			return "mqtt";
+		} break;
+	}
+	return "unknown";
+}
+
+int plua_set_userdata(lua_State *L, struct plua_interface_t *interface, char *type) {
+	if(lua_gettop(L) != 1) {
+		pluaL_error(L, "%s.setUserdata requires 1 argument, %d given", type, lua_gettop(L));
+	}
+
+	if(interface == NULL) {
+		pluaL_error(L, "internal error: type object not passed", type);
+	}
+
+	char buf[128] = { '\0' }, *p = buf;
+	char *error = "userdata expected, got %s";
+
+	sprintf(p, error, lua_typename(L, lua_type(L, -1)));
+
+	luaL_argcheck(L,
+		(lua_type(L, -1) == LUA_TLIGHTUSERDATA || lua_type(L, -1) == LUA_TTABLE),
+		1, buf);
+
+	if(lua_type(L, -1) == LUA_TLIGHTUSERDATA) {
+		struct plua_interface_t *tmp = (void *)lua_topointer(L, -1);
+		if(tmp->type != PLUA_TABLE) {
+			pluaL_error(L, "table object required but %s object passed", plua_interface_to_string(tmp->type));
+		}
+
+		if(interface->table != (void *)lua_topointer(L, -1)) {
+			plua_metatable_free(interface->table);
+		}
+		interface->table = (void *)lua_topointer(L, -1);
+
+		atomic_inc(interface->table->ref);
+
+		lua_remove(L, -1);
+
+		lua_pushboolean(L, 1);
+
+		assert(plua_check_stack(L, 1, PLUA_TBOOLEAN) == 0);
+
+		return 1;
+	}
+
+	if(lua_type(L, -1) == LUA_TTABLE) {
+		lua_pushnil(L);
+		while(lua_next(L, -2) != 0) {
+			plua_metatable_parse_set(L, interface->table);
+			lua_pop(L, 1);
+		}
+
+		lua_remove(L, -1);
+
+		lua_pushboolean(L, 1);
+
+		assert(plua_check_stack(L, 1, PLUA_TBOOLEAN) == 0);
+
+		return 1;
+	}
+	lua_pushboolean(L, 0);
+
+	assert(plua_check_stack(L, 1, PLUA_TBOOLEAN) == 0);
+	return 1;
+}
+
+int plua_get_userdata(lua_State *L, struct plua_interface_t *interface, char *type) {
+	if(lua_gettop(L) != 0) {
+		pluaL_error(L, "%s.getUserdata requires 0 argument, %d given", type, lua_gettop(L));
+	}
+
+	if(interface == NULL) {
+		pluaL_error(L, "internal error: timer object not passed");
+	}
+
+	push__plua_metatable(L, interface);
+
+	assert(plua_check_stack(L, 1, PLUA_TTABLE) == 0);
+	return 1;
+}
 
 void plua_package_path(const char *path) {
 	int i = 0;

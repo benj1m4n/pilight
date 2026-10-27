@@ -113,3 +113,6 @@ void init(void) {
 	ev1527Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *ev1527;

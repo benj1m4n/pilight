@@ -15,6 +15,8 @@ function M.timer(timer)
 	local config = pilight.config();
 	local data = config.getData();
 	local port = lookup(data , 'hardware', '433nano', 'comport') or nil;
+	local data1 = timer.getUserdata();
+	data1['write'] = 0;
 
 	if port == nil then
 		return;
@@ -22,7 +24,8 @@ function M.timer(timer)
 
 	local serial = pilight.io.serial(port);
 	if serial.open() == false then
-		error("could not connect to device \"" .. port .. "\"");
+		pilight.log(LOG_ERR, "could not connect to device \"" .. port .. "\"");
+		return;
 	end
 	serial.read();
 	timer.stop();
@@ -71,6 +74,16 @@ function M.send(obj, reason, data)
 	serial.write(code);
 end
 
+function invalid_stream(data, content)
+	pilight.log(LOG_NOTICE, "433nano: received invalid stream \'" .. content .. "'");
+
+	data['pulses'] = {};
+	data['length'] = 0;
+	data['content'] = '';
+	data['write'] = 2;
+	data['invalid'] = 1;
+end
+
 function M.callback(rw, serial, line)
 	if line == nil then
 		return;
@@ -99,7 +112,15 @@ function M.callback(rw, serial, line)
 				data['content'] = "";
 			end
 
-			data['content'] = data['content'] .. line;
+			if data['invalid'] == nil then
+				data['invalid'] = 0;
+			end
+
+			if line ~= '\n' then
+				data['content'] = data['content'] .. line;
+			else
+				data['content'] = "";
+			end
 
 			local a = #data['content'];
 			local l = a;
@@ -112,14 +133,14 @@ function M.callback(rw, serial, line)
 					end
 				end
 
-				if l == a then
+				local c = string.sub(data['content'], l, l);
+
+				if l == a and c ~= '@' then
 					break;
 				end
 
-				local c = string.sub(data['content'], l, l);
 				if c == '@' then
 					content = string.sub(data['content'], 1, l)
-
 					data['content'] = string.sub(data['content'], l+1, a);
 					a = #data['content'];
 
@@ -152,6 +173,11 @@ function M.callback(rw, serial, line)
 										c = string.sub(content, i+1, x);
 										i = x + 1;
 										pulses[#pulses+1] = tonumber(c);
+										if #pulses > 9 then
+											invalid_stream(data, content);
+											serial.read();
+											return;
+										end
 										if c == '@' then
 											i = x + 1;
 											break;
@@ -179,11 +205,15 @@ function M.callback(rw, serial, line)
 					if #stream > 0 then
 						local b = 1;
 						for i = 1, #stream, 1 do
+							if tonumber(stream[i]) ~= nil then
 							data['pulses'][b] = pulses[1];
 							b = b + 1;
 							data['pulses'][b] = pulses[stream[i] + 1];
 							b = b + 1;
+							end
 						end
+
+						data['invalid'] = 0;
 
 						data['length'] = b-1;
 						local tmp = data['content'];
@@ -204,6 +234,7 @@ function M.callback(rw, serial, line)
 		serial.read();
 	elseif rw == 'disconnect' then
 		local timer = pilight.async.timer();
+		timer.setUserdata(serial.getUserdata()());
 		timer.setCallback("timer");
 		timer.setTimeout(1000);
 		timer.setRepeat(1000);
@@ -223,24 +254,24 @@ function M.validate()
 
 	for x in pairs(settings) do
 		if x ~= 'comport' then
-			error(x .. "is an unknown parameter")
+			pilight.log(LOG_ERR, x .. "is an unknown parameter")
 		end
 	end
 
 	local port = lookup(data, 'hardware', '433nano', 'comport') or nil;
 
 	if port == nil then
-		error("comport parameter is missing");
+		pilight.log(LOG_ERR, "comport parameter is missing");
 	end
 
 	file = pilight.io.file(port);
 
 	if file.exists() == false then
-		error(port .. " does not exist");
+		pilight.log(LOG_ERR, port .. " does not exist");
 	end
 
 	if file.open("a+") == false then
-		error(port .. " cannot be opened for reading and/or writing");
+		pilight.log(LOG_ERR, port .. " cannot be opened for reading and/or writing");
 	end
 	file.close();
 end
@@ -252,7 +283,7 @@ function M.run()
 	local port = lookup(data, 'hardware', '433nano', 'comport') or nil;
 
 	if port == nil then
-		error("comport parameter is missing");
+		pilight.log(LOG_ERR, "comport parameter is missing");
 	end
 
 	local serial = pilight.io.serial(port);
@@ -260,7 +291,7 @@ function M.run()
 	serial.setParity('n');
 	serial.setCallback("callback");
 	if serial.open() == false then
-		error("could not connect to device \"" .. port .. "\"");
+		pilight.log(LOG_ERR, "could not connect to device \"" .. port .. "\"");
 	end
 	serial.read();
 
@@ -288,4 +319,4 @@ function M.info()
 	}
 end
 
-return M;
+return M; 

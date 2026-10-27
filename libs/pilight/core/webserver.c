@@ -132,7 +132,9 @@ enum {
 };
 
 typedef struct webserver_clients_t {
-	uv_poll_t *req;
+	uv_poll_t *poll_req;
+	uv_timer_t *timer_req;
+
 	int is_websocket;
 
 	struct webserver_clients_t *next;
@@ -184,7 +186,7 @@ int webserver_gc(void) {
 	{
 		while(webserver_clients) {
 			node = webserver_clients->next;
-			poll_close_cb(webserver_clients->req);
+			poll_close_cb(webserver_clients->poll_req);
 			webserver_clients = node;
 		}
 	}
@@ -278,6 +280,25 @@ const char *http_get_header(struct connection_t *conn, const char *s) {
 	return NULL;
 }
 
+void http_free_connection(struct connection_t *conn) {
+	int i = 0;
+
+	for(i = 0; i < conn->num_headers; i++) {
+		FREE(conn->http_headers[i].name);
+		FREE(conn->http_headers[i].value);
+	}
+	if(conn->request_method != NULL) {
+		FREE(conn->request_method);
+	}
+	if(conn->http_version != NULL) {
+		FREE(conn->http_version);
+	}
+	if(conn->uri != NULL) {
+		FREE(conn->uri);
+	}
+}
+
+#ifdef WEBSERVER
 void send_auth_request(uv_poll_t *req) {
 	/*
 	 * Make sure we execute in the main thread
@@ -613,6 +634,7 @@ static int parse_rest(uv_poll_t *req) {
 // #endif
 								char *z = "{\"message\":\"failed\",\"error\":\"device does not exist\"}";
 								send_data(req, "application/json", z, strlen(z));
+								FREE(decoded);
 								goto clear;
 							}
 						} else if(strncmp(array1[0], "values", 6) == 0) {
@@ -620,6 +642,7 @@ static int parse_rest(uv_poll_t *req) {
 							if(sscanf(array1[0], "values[%254[a-z]]", ptr) != 1) {
 								char *z = "{\"message\":\"failed\",\"error\":\"values should be passed like this \'values[dimlevel]=10\'\"}";
 								send_data(req, "application/json", z, strlen(z));
+								FREE(decoded);
 								goto clear;
 							} else {
 								if(isNumeric(array1[1]) == 0) {
@@ -639,6 +662,7 @@ static int parse_rest(uv_poll_t *req) {
 					if(has_protocol == 0) {
 						char *z = "{\"message\":\"failed\",\"error\":\"no protocol was sent\"}";
 						send_data(req, "application/json", z, strlen(z));
+						FREE(decoded);
 						goto clear;
 					}
 					if(pilight.send != NULL) {
@@ -648,6 +672,7 @@ static int parse_rest(uv_poll_t *req) {
 						if(pilight.send(jobject, ORIGIN_WEBSERVER) == 0) {
 							char *z = "{\"message\":\"success\"}";
 							send_data(req, "application/json", z, strlen(z));
+							FREE(decoded);
 							goto clear;
 						}
 					}
@@ -656,6 +681,7 @@ static int parse_rest(uv_poll_t *req) {
 						if(dev == NULL) {
 							char *z = "{\"message\":\"failed\",\"error\":\"no device was sent\"}";
 							send_data(req, "application/json", z, strlen(z));
+							FREE(decoded);
 							goto clear;
 						} else {
 							if(strlen(state) > 0) {
@@ -664,6 +690,7 @@ static int parse_rest(uv_poll_t *req) {
 							if(pilight.control(dev, p, json_first_child(jvalues), ORIGIN_WEBSERVER) == 0) {
 								char *z = "{\"message\":\"success\"}";
 								send_data(req, "application/json", z, strlen(z));
+								FREE(decoded);
 								goto clear;
 							}
 						}
@@ -1008,7 +1035,7 @@ static int request_handler(uv_poll_t *req) {
 						sprintf(conn->request, "%s/%s", root, conn->uri);
 				} else {
 					if(conn->uri[0] == '/')
-						sprintf(conn->request, "%s/%s", root, conn->uri);
+						sprintf(conn->request, "%s%s", root, conn->uri);
 					else
 						sprintf(conn->request, "%s/%s", root, conn->uri);
 				}
@@ -1050,8 +1077,8 @@ static int request_handler(uv_poll_t *req) {
 				} else {
 					strcpy(conn->mimetype, "text/plain");
 				}
+				FREE(ext);
 			}
-			FREE(ext);
 
 			memset(buffer, '\0', 4096);
 			p = buffer;
@@ -1114,30 +1141,32 @@ static int request_handler(uv_poll_t *req) {
 			return MG_MORE;
 		}
 	} else if(websockets == WEBGUI_WEBSOCKETS) {
-		char *input = MALLOC(conn->content_len+1);
-		if(input == NULL) {
-			OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
-		}
-		memset(input, '\0', conn->content_len+1);
-
-		strncpy(input, conn->content, conn->content_len);
-		input[conn->content_len] = '\0';
-
-		if(json_validate(input) == true) {
-			struct reason_socket_received_t *data = MALLOC(sizeof(struct reason_socket_received_t));
-			if(data == NULL) {
+		if(conn->content_len > 0) {
+			char *input = MALLOC(conn->content_len+1);
+			if(input == NULL) {
 				OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
 			}
-			data->fd = conn->fd;
-			if((data->buffer = MALLOC(strlen(input)+1)) == NULL) {
-				OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
-			}
-			strcpy(data->buffer, input);
-			strcpy(data->type, "websocket");
+			memset(input, '\0', conn->content_len+1);
 
-			eventpool_trigger(REASON_SOCKET_RECEIVED, reason_socket_received_free, data);
+			strncpy(input, conn->content, conn->content_len);
+			input[conn->content_len] = '\0';
+
+			if(json_validate(input) == true) {
+				struct reason_socket_received_t *data = MALLOC(sizeof(struct reason_socket_received_t));
+				if(data == NULL) {
+					OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
+				}
+				data->fd = conn->fd;
+				if((data->buffer = MALLOC(strlen(input)+1)) == NULL) {
+					OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
+				}
+				strcpy(data->buffer, input);
+				strcpy(data->type, "websocket");
+
+				eventpool_trigger(REASON_SOCKET_RECEIVED, reason_socket_received_free, data);
+			}
+			FREE(input);
 		}
-		FREE(input);
 		return MG_TRUE;
 	}
 
@@ -1173,7 +1202,7 @@ static void webserver_process(uv_async_t *handle) {
 			if(tmp->fd > 0) {
 				int fd = 0, r = 0;
 
-				if((r = uv_fileno((uv_handle_t *)clients->req, (uv_os_fd_t *)&fd)) != 0) {
+				if((r = uv_fileno((uv_handle_t *)clients->poll_req, (uv_os_fd_t *)&fd)) != 0) {
 					/*LCOV_EXCL_START*/
 					logprintf(LOG_ERR, "uv_fileno: %s", uv_strerror(r));
 					continue;
@@ -1181,16 +1210,15 @@ static void webserver_process(uv_async_t *handle) {
 				}
 
 				if(fd == tmp->fd) {
-					websocket_write(clients->req, WEBSOCKET_OPCODE_TEXT, tmp->out, tmp->len);
+					websocket_write(clients->poll_req, WEBSOCKET_OPCODE_TEXT, tmp->out, tmp->len);
 				}
 			} else if(clients->is_websocket == 1) {
-				websocket_write(clients->req, 1, tmp->out, tmp->len);
+				websocket_write(clients->poll_req, 1, tmp->out, tmp->len);
 			}
 			clients = clients->next;
 		}
-		if(tmp->len > 0) {
-			FREE(tmp->out);
-		}
+
+		FREE(tmp->out);
 		broadcast_list = broadcast_list->next;
 		FREE(tmp);
 	}
@@ -1222,43 +1250,45 @@ static void *broadcast(int reason, void *param, void *userdata) {
 	if((node->out = MALLOC(1024)) == NULL) {
 		OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
 	}
-
+	memset(node->out, 0, 1024);
 	int i = 0;
 	switch(reason) {
 		case REASON_CONFIG_UPDATE: {
 			struct reason_config_update_t *data = param;
-			node->len += snprintf(node->out, 1024,
+			node->len += snprintf(node->out, 1023,
 				"{\"origin\":\"update\",\"type\":%d,\"devices\":[",
 				data->type
 			);
 			for(i=0;i<data->nrdev;i++) {
-				node->len += snprintf(&node->out[node->len], 1024-node->len, "\"%s\",", data->devices[i]);
+				node->len += snprintf(&node->out[node->len], 1023-node->len, "\"%s\",", data->devices[i]);
 			}
-			node->len += snprintf(&node->out[node->len-1], 1024-node->len, "],\"values\":{");
+			node->len += snprintf(&node->out[node->len-1], 1023-node->len, "],\"values\":{");
 			node->len -= 1;
 			for(i=0;i<data->nrval;i++) {
 				if(data->values[i].type == JSON_NUMBER) {
-					node->len += snprintf(&node->out[node->len], 1024-node->len,
+					node->len += snprintf(&node->out[node->len], 1023-node->len,
 						"\"%s\":%.*f,",
 						data->values[i].name, data->values[i].decimals, data->values[i].number_
 					);
 				} else if(data->values[i].type == JSON_STRING) {
-					node->len += snprintf(&node->out[node->len], 1024-node->len,
+					node->len += snprintf(&node->out[node->len], 1023-node->len,
 						"\"%s\":\"%s\",",
 						data->values[i].name, data->values[i].string_
 					);
 				}
 			}
-			node->len += snprintf(&node->out[node->len-1], 1024-node->len, "}}");
+			node->len += snprintf(&node->out[node->len-1], 1023-node->len, "}}");
 			node->len -= 1;
 		} break;
 		case REASON_BROADCAST_CORE:
-			strncpy(node->out, (char *)param, 1024);
+			strncpy(node->out, (char *)param, 1023);
 			node->len = strlen(node->out);
 		break;
-		default:
+		default: {
+			FREE(node->out);
 			FREE(node);
-		return NULL;
+			return NULL;
+		}
 	}
 
 	struct broadcast_list_t *tmp = broadcast_list;
@@ -1282,21 +1312,22 @@ static void *broadcast(int reason, void *param, void *userdata) {
 
 	return NULL;
 }
+#endif
 
-static char *skip(char **buf, const char *delimiters) {
-  char *p, *begin_word, *end_word, *end_delimiters;
+static char *skip(char *buf, ssize_t *pos, const char *delimiters) {
+	char *ptr = strstr(buf, delimiters);
+	char *token = NULL;
 
-  begin_word = *buf;
-  end_word = begin_word + strcspn(begin_word, delimiters);
-  end_delimiters = end_word + strspn(end_word, delimiters);
-
-  for(p = end_word; p < end_delimiters; p++) {
-    *p = '\0';
-  }
-
-  *buf = end_delimiters;
-
-  return begin_word;
+	if(ptr != NULL) {
+		ssize_t x = ptr-buf;
+		if((token = MALLOC(x+1)) == NULL) {
+			OUT_OF_MEMORY
+		}
+		memset(token, '\0', x+1);
+		memmove(token, buf, x);
+		*pos += (x+strlen(delimiters));
+	}
+	return token;
 }
 
 static int is_valid_http_method(const char *s) {
@@ -1326,15 +1357,24 @@ static void remove_double_dots_and_double_slashes(char *s) {
 	*p = '\0';
 }
 
-static void parse_http_headers(char **buf, struct connection_t *c) {
+static void parse_http_headers(const char *buf, ssize_t *pos, struct connection_t *c) {
 	size_t i;
 	c->num_headers = 0;
 	for(i = 0; i < 1024; i++) {
-		c->http_headers[i].name = skip(buf, ": ");
-		c->http_headers[i].value = skip(buf, "\r\n");
-		if(c->http_headers[i].name[0] == '\0')
+		c->http_headers[i].name = skip((char *)&buf[*pos], pos, ": ");
+		if(c->http_headers[i].name == NULL) {
 			break;
+		}
+		c->http_headers[i].value = skip((char *)&buf[*pos], pos, "\r\n");
+		if(c->http_headers[i].value == NULL) {
+			if((c->http_headers[i].value = STRDUP((char *)&buf[*pos])) == NULL) {
+				OUT_OF_MEMORY /* LCOV_EXCL_LINE*/
+			}
+		}
 		c->num_headers = i + 1;
+	}
+	if(strncmp(&buf[*pos], "\r\n", 2) == 0) {
+		*pos += 2;
 	}
 }
 
@@ -1363,28 +1403,38 @@ static int _urldecode(const char *src, int src_len, char *dst, int dst_len, int 
 	return i >= src_len ? j : -1;
 }
 
-int http_parse_request(char *buffer, struct connection_t *c) {
+int http_parse_request(const char *buffer, ssize_t *pos, struct connection_t *c) {
 	int is_request = 0, n = 0;
 
-	while(*buffer != '\0' && isspace(*(unsigned char *)buffer)) {
-		buffer++;
+	while(buffer[*pos] != '\0' && isspace(buffer[*pos])) {
+		(*pos)++;
 	}
 
-	c->request_method = skip(&buffer, " ");
-	c->uri = skip(&buffer, " ");
-	c->http_version = skip(&buffer, "\r\n");
+	c->request_method = skip((char *)&buffer[*pos], pos, " ");
+	c->uri = skip((char *)&buffer[*pos], pos, " ");
+	c->http_version = skip((char *)&buffer[*pos], pos, "\r\n");
+
+	/*
+	 * A malformed request line (e.g. a bare "\r\n") leaves one of
+	 * these NULL. Previously this crashed the daemon in strcmp().
+	 */
+	if(c->request_method == NULL || c->uri == NULL || c->http_version == NULL) {
+		return -1;
+	}
 
 	is_request = is_valid_http_method(c->request_method);
 	if((is_request && memcmp(c->http_version, "HTTP/", 5) != 0) ||
 		(!is_request && memcmp(c->request_method, "HTTP/", 5) != 0)) {
 	} else {
 		if(is_request == 1) {
-			c->http_version += 5;
+			int len = strlen(c->http_version);
+			memmove(c->http_version, &c->http_version[5], len-5);
+			c->http_version[len-5] = '\0';
 		} else {
 			c->status_code = atoi(c->uri);
 		}
-		parse_http_headers(&buffer, c);
 
+		parse_http_headers(buffer, pos, c);
 		if((c->query_string = strchr(c->uri, '?')) != NULL) {
 			*(char *)c->query_string++ = '\0';
 		}
@@ -1415,7 +1465,8 @@ static void webserver_client_add(uv_poll_t *req) {
 	if(node == NULL) {
 		OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
 	}
-	node->req = req;
+	node->poll_req = req;
+	node->timer_req = NULL;
 	node->is_websocket = 0;
 
 	node->next = webserver_clients;
@@ -1438,7 +1489,7 @@ static void webserver_client_remove(uv_poll_t *req) {
 	prevP = NULL;
 
 	for(currP = webserver_clients; currP != NULL; prevP = currP, currP = currP->next) {
-		if(currP->req == req) {
+		if(currP->poll_req == req) {
 			if(prevP == NULL) {
 				webserver_clients = currP->next;
 			} else {
@@ -1489,6 +1540,28 @@ static void send_websocket_handshake(uv_poll_t *req, const char *key) {
 	FREE(b64_sha);
 }
 
+static void websocket_ping(uv_timer_t *handle) {
+	struct webserver_clients_t *client = handle->data;
+	uv_poll_t *poll_req = client->poll_req;
+	struct uv_custom_poll_t *custom_poll_data = poll_req->data;
+	struct connection_t *conn = custom_poll_data->data;
+	struct timespec ping;
+	unsigned int lastseen = 0;
+
+	if(conn->ping.tv_sec > 0 && conn->ping.tv_nsec > 0) {
+		clock_gettime(CLOCK_MONOTONIC, &ping);
+		lastseen = ((double)ping.tv_sec + 1.0e-9*ping.tv_nsec) - ((double)conn->ping.tv_sec + 1.0e-9*conn->ping.tv_nsec);
+	}
+
+	if(lastseen > 60) {
+		uv_timer_stop(handle);
+		uv_custom_close(poll_req);
+		return;
+	}
+
+	websocket_write(client->poll_req, WEBSOCKET_OPCODE_PING, NULL, 0);
+}
+
 static void send_websocket_handshake_if_requested(uv_poll_t *req) {
 	/*
 	 * Make sure we execute in the main thread
@@ -1506,8 +1579,17 @@ static void send_websocket_handshake_if_requested(uv_poll_t *req) {
 
 		struct webserver_clients_t *tmp = webserver_clients;
 		while(tmp) {
-			if(tmp->req == req) {
+			if(tmp->poll_req == req) {
 				tmp->is_websocket = 1;
+				if((tmp->timer_req = MALLOC(sizeof(uv_timer_t))) == NULL) {
+					OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
+				}
+
+				tmp->timer_req->data = tmp;
+
+				uv_timer_init(uv_default_loop(), tmp->timer_req);
+				uv_timer_start(tmp->timer_req, (void (*)(uv_timer_t *))websocket_ping, 1000, 1000);
+
 				break;
 			}
 			tmp = tmp->next;
@@ -1528,33 +1610,43 @@ int websocket_read(uv_poll_t *req, unsigned char *buf, ssize_t buf_len) {
 
 	unsigned int i = 0, j = 0;
 	unsigned char mask[4];
-	unsigned int packet_length = 0;
-	unsigned int length_code = 0;
+	uint32_t packet_length = 0;
 	int index_first_mask = 0;
 	int index_first_data_byte = 0;
 	int opcode = buf[0] & 0xF;
 
 	memset(&mask, '\0', 4);
-	length_code = ((unsigned char)buf[1]) & 0x7F;
+	packet_length = ((unsigned char)buf[1]) & 0x7F;
+
 	index_first_mask = 2;
-	if(length_code == 126) {
+	if(packet_length == 126) {
 		index_first_mask = 4;
-	} else if(length_code == 127) {
+		packet_length = buf[2] << 8 | buf[3];
+	} else if(packet_length == 127) {
+		if(buf[2] != 0 || buf[3] != 0 || buf[4] != 0 || buf[5] != 0) {
+			/*
+			 * Packet length too big
+			 */
+			return -1;
+		} else {
+			packet_length = buf[6] << 24 | buf[7] << 16 | buf[8] << 8 | buf[9];
+		}
 		index_first_mask = 10;
 	}
 	memcpy(mask, &buf[index_first_mask], 4);
 	index_first_data_byte = index_first_mask + 4;
-	packet_length = buf_len - index_first_data_byte;
-	for(i = index_first_data_byte, j = 0; i < buf_len; i++, j++) {
+
+	for(i = index_first_data_byte, j = 0; i < buf_len && i < packet_length + index_first_data_byte; i++, j++) {
 		buf[j] = buf[i] ^ mask[j % 4];
 	}
 	buf[packet_length] = '\0';
 
+	conn->content_len = 0;
+	conn->content = NULL;
+
 	switch(opcode) {
 		case WEBSOCKET_OPCODE_PONG: {
-			struct timeval tv;
-			gettimeofday(&tv, NULL);
-			conn->ping = 1000000 * (unsigned int)tv.tv_sec + (unsigned int)tv.tv_usec;
+			clock_gettime(CLOCK_MONOTONIC, &conn->ping);
 		} break;
 		case WEBSOCKET_OPCODE_PING: {
 			websocket_write(req, WEBSOCKET_OPCODE_PONG, NULL, 0);
@@ -1626,6 +1718,8 @@ static void poll_close_cb(uv_poll_t *req) {
 	struct connection_t *conn = custom_poll_data->data;
 	int fd = -1, r = 0;
 
+	char buffer[BUFFER_SIZE] = { 0 };
+
 	if((r = uv_fileno((uv_handle_t *)req, (uv_os_fd_t *)&fd)) != 0) {
 		/*LCOV_EXCL_START*/
 		logprintf(LOG_ERR, "uv_fileno: %s", uv_strerror(r));
@@ -1641,12 +1735,15 @@ static void poll_close_cb(uv_poll_t *req) {
 		shutdown(fd, SD_BOTH);
 		closesocket(fd);
 #else
-		shutdown(fd, SHUT_RDWR);
+		shutdown(fd, SHUT_WR);
+		while(recv(fd, buffer, BUFFER_SIZE, 0) > 0);
 		close(fd);
 #endif
 	}
 
 	if(conn != NULL) {
+		http_free_connection(conn);
+
 		if(conn->fd > 0) {
 #ifdef _WIN32
 			closesocket(conn->fd);
@@ -1658,6 +1755,18 @@ static void poll_close_cb(uv_poll_t *req) {
 		if(conn->request != NULL) {
 			FREE(conn->request);
 		}
+	}
+
+	struct webserver_clients_t *tmp = webserver_clients;
+	while(tmp) {
+		if(tmp->poll_req == req) {
+			if(tmp->timer_req != NULL && !uv_is_closing((uv_handle_t *)req)) {
+				uv_timer_stop(tmp->timer_req);
+				uv_close((uv_handle_t *)tmp->timer_req, close_cb);
+			}
+			break;
+		}
+		tmp = tmp->next;
 	}
 
 	webserver_client_remove(req);
@@ -1694,7 +1803,7 @@ static void client_write_cb(uv_poll_t *req) {
 	}
 }
 
-static void client_read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
+static ssize_t client_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 	/*
 	 * Make sure we execute in the main thread
 	 */
@@ -1703,48 +1812,43 @@ static void client_read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
 
 	struct uv_custom_poll_t *custom_poll_data = req->data;
 	struct connection_t *c = (struct connection_t *)custom_poll_data->data;
-	int is_websocket = 0;
 
-	if(c != NULL && c->is_websocket == 1) {
-		is_websocket = 1;
-	}
-
-	if(*nread > 0 && is_websocket == 0) {
-		buf[*nread-1] = '\0';
-	}
-
-	if(*nread > 0) {
+	ssize_t pos = 0;
+	if(nread > 0) {
 		if(c->is_websocket == 0) {
-			http_parse_request(buf, c);
+			if(http_parse_request(buf, &pos, c) == -1) {
+				uv_custom_close(req);
+				return nread;
+			}
 			send_websocket_handshake_if_requested(req);
 
 			if(auth_handler(req) == MG_FALSE) {
 				send_auth_request(req);
 				uv_custom_close(req);
-				return;
+				return pos;
 			}
 		} else {
 			unsigned char *p = (unsigned char *)buf;
-			if(websocket_read(req, p, *nread) == -1) {
+			if(websocket_read(req, p, nread) == -1) {
 				uv_custom_close(req);
-				return;
+				return nread;
 			}
 		}
 		int x = request_handler(req);
 		if(x == MG_TRUE) {
 			if(c->is_websocket == 1) {
 				uv_custom_read(req);
-				*nread = 0;
-				return;
+				return nread;
 			}
 
 			uv_custom_close(req);
-			return;
+			return pos;
 		}
 	}
+	return pos;
 }
 
-static void server_read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
+static ssize_t server_read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 	/*
 	 * Make sure we execute in the main thread
 	 */
@@ -1763,13 +1867,13 @@ static void server_read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
 	if((r = uv_fileno((uv_handle_t *)req, (uv_os_fd_t *)&fd)) != 0) {
 		/*LCOV_EXCL_START*/
 		logprintf(LOG_ERR, "uv_fileno: %s", uv_strerror(r));
-		return;
+		return 0;
 		/*LCOV_EXCL_STOP*/
 	}
 
 	if((client = accept(fd, (struct sockaddr *)&servaddr, (socklen_t *)&socklen)) < 0) {
 		logprintf(LOG_NOTICE, "accept: %s", strerror(errno));
-		return;
+		return 0;
 	}
 
 	memset(&buffer, '\0', INET_ADDRSTRLEN+1);
@@ -1782,7 +1886,7 @@ static void server_read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
 #else
 		close(client);
 #endif
-		return;
+		return 0;
 	} else {
 		logprintf(LOG_DEBUG, "new client, ip: %s, port: %d", buffer, ntohs(servaddr.sin_port));
 		logprintf(LOG_DEBUG, "client fd: %d", client);
@@ -1827,7 +1931,7 @@ static void server_read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
 			poll_req->data = NULL;
 		}
 		FREE(poll_req);
-		return;
+		return 0;
 		/*LCOV_EXCL_STOP*/
 	}
 
@@ -1843,7 +1947,7 @@ static void server_read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
 	c->is_websocket = 0;
 	c->fd = client;
 	c->flags = 0;
-	c->ping = 0;
+	memset(&c->ping, 0, sizeof(struct timespec));
 	c->file_fd = -1;
 #ifdef WEBSERVER_HTTPS
 	c->is_ssl = custom_poll_data->is_ssl = server_poll_data->is_ssl;
@@ -1853,6 +1957,8 @@ static void server_read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
 	webserver_client_add(poll_req);
 	uv_custom_read(req);
 	uv_custom_read(poll_req);
+
+	return nread;
 }
 
 static void server_write_cb(uv_poll_t *req) {
@@ -1959,7 +2065,7 @@ static int webserver_init(int port, int is_ssl) {
 		return -1;
 	}
 
-	if((listen(sockfd, 0)) < 0) {
+	if((listen(sockfd, TCP_BACKLOG)) < 0) {
 		/*LCOV_EXCL_START*/
 		logprintf(LOG_ERR, "listen: %s", strerror(errno));
 #ifdef _WIN32

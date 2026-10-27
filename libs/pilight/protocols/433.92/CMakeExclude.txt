@@ -69,6 +69,11 @@ if(${PROTOCOL_COCO_SWITCH} MATCHES "OFF"
 	list(REMOVE_ITEM ${PROJECT_NAME}_headers "${PROJECT_SOURCE_DIR}/arctech_switch.h")
 endif()
 
+if(${PROTOCOL_SMARTWARES_SWITCH} MATCHES "OFF")
+	list(REMOVE_ITEM ${PROJECT_NAME}_sources "${PROJECT_SOURCE_DIR}/smartwares_switch.c")
+	list(REMOVE_ITEM ${PROJECT_NAME}_headers "${PROJECT_SOURCE_DIR}/smartwares_switch.h")
+endif()
+
 if(${PROTOCOL_ELRO_SWITCH} MATCHES "OFF" AND ${PROTOCOL_BRENNENSTUHL_SWITCH} MATCHES "OFF")
 	list(REMOVE_ITEM ${PROJECT_NAME}_sources "${PROJECT_SOURCE_DIR}/elro_300_switch.c")
 	list(REMOVE_ITEM ${PROJECT_NAME}_sources "${PROJECT_SOURCE_DIR}/elro_400_switch.c")
@@ -192,6 +197,11 @@ if(${PROTOCOL_EV1527} MATCHES "OFF")
 	list(REMOVE_ITEM ${PROJECT_NAME}_headers "${PROJECT_SOURCE_DIR}/ev1527.h")
 endif()
 
+if(${PROTOCOL_FANJU} MATCHES "OFF")
+	list(REMOVE_ITEM ${PROJECT_NAME}_sources "${PROJECT_SOURCE_DIR}/fanju.c")
+	list(REMOVE_ITEM ${PROJECT_NAME}_headers "${PROJECT_SOURCE_DIR}/fanju.h")
+endif()
+
 if(${PROTOCOL_KERUI} MATCHES "OFF")
 	list(REMOVE_ITEM ${PROJECT_NAME}_sources "${PROJECT_SOURCE_DIR}/kerui_d026.c")
 	list(REMOVE_ITEM ${PROJECT_NAME}_headers "${PROJECT_SOURCE_DIR}/kerui_d026.h")
@@ -261,4 +271,14 @@ endif()
 if(${PROTOCOL_TCM} MATCHES "OFF")
 	list(REMOVE_ITEM ${PROJECT_NAME}_sources "${PROJECT_SOURCE_DIR}/tcm.c")
 	list(REMOVE_ITEM ${PROJECT_NAME}_headers "${PROJECT_SOURCE_DIR}/tcm.h")
+endif()
+
+if(${PROTOCOL_GW_IWDS07} MATCHES "OFF")
+        list(REMOVE_ITEM ${PROJECT_NAME}_sources "${PROJECT_SOURCE_DIR}/iwds07.c")
+        list(REMOVE_ITEM ${PROJECT_NAME}_headers "${PROJECT_SOURCE_DIR}/iwds07.h")
+endif()
+
+if(${PROTOCOL_NEXUS} MATCHES "OFF")
+	list(REMOVE_ITEM ${PROJECT_NAME}_sources "${PROJECT_SOURCE_DIR}/nexus.c")
+	list(REMOVE_ITEM ${PROJECT_NAME}_headers "${PROJECT_SOURCE_DIR}/nexus.h")
 endif()

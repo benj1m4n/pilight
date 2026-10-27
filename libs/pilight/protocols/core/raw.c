@@ -89,3 +89,6 @@ void init(void) {
 	rawInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *raw;

@@ -164,3 +164,6 @@ unsigned char *fcache_get_bytes(char *filename) {
 	}
 	return NULL;
 }
+
+/* single definition (previously a tentative definition in the header) */
+struct fcache_t *fcache;

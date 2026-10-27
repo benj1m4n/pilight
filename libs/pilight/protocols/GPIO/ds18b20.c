@@ -260,3 +260,6 @@ void init(void) {
 	ds18b20Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *ds18b20;

@@ -267,3 +267,6 @@ void init(void) {
 	elro800SwitchInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *elro_800_switch;

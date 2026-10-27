@@ -11,10 +11,12 @@ Weather Stations
    auriol_h13726
    conrad
    dostmann
+   fanju
    hama_ews1500
    iboutique
    kaku
    meteoscan_w1xxx
+   nexus
    ninja_blocks
    soens
    tcm

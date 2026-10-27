@@ -203,18 +203,18 @@ enum tokentype {
 	TKN_ID = 403
 };
 
-char default_programmer[MAX_STR_CONST];
-char default_parallel[4096];
-char default_serial[4096];
+extern char default_programmer[MAX_STR_CONST];
+extern char default_parallel[4096];
+extern char default_serial[4096];
 
-char string_buf[MAX_STR_CONST];
-char *string_buf_ptr;
+extern char string_buf[MAX_STR_CONST];
+extern char *string_buf_ptr;
 
-PROGRAMMER * current_prog;
-AVRPART    * current_part;
+extern PROGRAMMER * current_prog;
+extern AVRPART    * current_part;
 
-int    lineno;
-const char * infile;
+extern int    lineno;
+extern const char * infile;
 extern char string_buf[MAX_STR_CONST];
 extern char *string_buf_ptr;
 

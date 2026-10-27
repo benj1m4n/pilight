@@ -93,7 +93,7 @@ typedef struct request_t {
 	int has_chunked;
 
   char *content;
-	char mimetype[255];
+	char mimetype[256];
 	int chunked;
 	int chunksize;
 	int chunkread;
@@ -126,6 +126,7 @@ static void free_request(struct request_t *request) {
 
 int http_gc(void) {
 	struct http_clients_t *node = NULL;
+	char buffer[BUFFER_SIZE] = { 0 };
 
 #ifdef _WIN32
 	uv_mutex_lock(&http_lock);
@@ -140,7 +141,8 @@ int http_gc(void) {
 			shutdown(http_clients->fd, SD_BOTH);
 			closesocket(http_clients->fd);
 #else
-			shutdown(http_clients->fd, SHUT_RDWR);
+			shutdown(http_clients->fd, SHUT_WR);
+			while(recv(http_clients->fd, buffer, BUFFER_SIZE, 0) > 0);
 			close(http_clients->fd);
 #endif
 		}
@@ -282,7 +284,7 @@ static int prepare_request(struct request_t **request, int method, char *url, co
 			OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
 		}
 		memset((*request)->uri, 0, 2);
-		strncpy((*request)->uri, "/", 1);
+		(*request)->uri[0] = '/';
 	}
 	if((tok = strstr((*request)->host, "@"))) {
 		size_t pglen = strlen((*request)->uri);
@@ -383,25 +385,30 @@ static void append_to_header(char **header, char *data, ...) {
 	}
 }
 
-static void process_chunk(char **buf, ssize_t *size, struct request_t *request) {
-	char *p = NULL;
+static void process_chunk(const char *buf, ssize_t *bytes, ssize_t total, struct request_t *request) {
+	char *p = NULL, *tmp = NULL;
 	int pos = 0,  toread = 0;
 
-	while(1) {
-		toread = *size;
-		if(strncmp(*buf, "0\r\n\r\n", 5) == 0) {
+	while(*bytes < total) {
+		toread = total;
+
+		if(strncmp(&buf[*bytes], "0\r\n\r\n", 5) == 0) {
 			request->reading = 0;
 			break;
 		}
+
 		if(request->chunksize == request->chunkread) {
-			if((p = strstr(*buf, "\r\n")) != NULL) {
-				pos = p-*buf;
-				(*buf)[pos+1] = '\0';
-				request->chunksize = strtoul(*buf, NULL, 16);
-				memmove(&(*buf)[0], &(*buf)[pos+2], toread-(pos+2));
+			if((p = strstr(&buf[*bytes], "\r\n")) != NULL) {
+				pos = p-&buf[*bytes];
+				if((tmp = MALLOC(pos+2)) == NULL) {
+					OUT_OF_MEMORY
+				}
+				memset(tmp, 0, pos+2);
+				memmove(tmp, &buf[*bytes], pos+1);
+				request->chunksize = strtoul(tmp, NULL, 16);
+				FREE(tmp);
 				toread -= (pos+2);
-				*size -= (pos+2);
-				(*buf)[toread] = '\0';
+				*bytes += (pos+2);
 			/*
 			 * When the header and data where communicated in
 			 * separate packets, the buffer from extracted from
@@ -409,7 +416,7 @@ static void process_chunk(char **buf, ssize_t *size, struct request_t *request) 
 			 * already announced we just have to wait a little
 			 * bit more. This behavior can be seen in Tasmota.
 			 */
-			} else if(strlen(*buf) == 0) {
+			} else if(strlen(&buf[*bytes]) == 0) {
 				break;
 			}
 		}
@@ -421,8 +428,10 @@ static void process_chunk(char **buf, ssize_t *size, struct request_t *request) 
 			break;
 		}
 
-		if((request->chunksize-request->chunkread) < *size) {
-			toread = request->chunksize-request->chunkread;
+		if((total - *bytes) < (request->chunksize-request->chunkread)) {
+			toread = (total-*bytes);
+		} else {
+			toread = (request->chunksize-request->chunkread);
 		}
 
 		if((request->content = REALLOC(request->content, request->bytes_read+toread+1)) == NULL) {
@@ -433,21 +442,16 @@ static void process_chunk(char **buf, ssize_t *size, struct request_t *request) 
 		 * Prevent uninitialised values in valgrind
 		 */
 		memset(&request->content[request->bytes_read], 0, toread+1);
-		memcpy(&request->content[request->bytes_read], *buf, toread);
+		memcpy(&request->content[request->bytes_read], &buf[*bytes], toread);
 		request->bytes_read += toread;
 		request->chunkread += toread;
 
-		memmove(&(*buf)[0], &(*buf)[toread], *size-toread);
-
-		*size -= toread;
-		(*buf)[*size] = '\0';
+		*bytes += toread;
 
 		if(request->chunkread <= request->chunksize) {
-			if(strncmp(*buf, "\r\n", 2) == 0) {
-				memmove(&(*buf)[0], &(*buf)[2], *size-2);
-				*size -= 2;
+			if(strncmp(&buf[*bytes], "\r\n", 2) == 0) {
+				*bytes += 2;
 				toread -= 2;
-				(*buf)[*size] = '\0';
 			}
 			if(request->chunkread == request->chunksize) {
 				request->chunksize = 0;
@@ -455,9 +459,9 @@ static void process_chunk(char **buf, ssize_t *size, struct request_t *request) 
 			}
 		}
 
-		if(request->chunksize == 0 && strstr(*buf, "\r\n") == NULL) {
+		if(request->chunksize == 0 && strstr(&buf[*bytes], "\r\n") == NULL) {
 			break;
-		} else if(*size > 0 && strncmp(*buf, "0\r\n\r\n", 5) != 0) {
+		} else if((total-*bytes) > 4 && strncmp(&buf[*bytes], "0\r\n\r\n", 5) != 0) {
 			request->reading = 1;
 		} else {
 			break;
@@ -485,6 +489,8 @@ static void http_client_close(uv_poll_t *req) {
 	struct uv_custom_poll_t *custom_poll_data = req->data;
 	struct request_t *request = custom_poll_data->data;
 	uv_timer_stop(request->timer_req);
+
+	char buffer[BUFFER_SIZE] = { 0 };
 
 	if(request->reading == 1) {
 		if(request->has_length == 0 && request->has_chunked == 0) {
@@ -514,7 +520,8 @@ static void http_client_close(uv_poll_t *req) {
 		shutdown(request->fd, SD_BOTH);
 		closesocket(request->fd);
 #else
-		shutdown(request->fd, SHUT_RDWR);
+		shutdown(request->fd, SHUT_WR);
+		while(recv(request->fd, buffer, BUFFER_SIZE, 0) > 0);
 		close(request->fd);
 #endif
 	}
@@ -524,6 +531,10 @@ static void http_client_close(uv_poll_t *req) {
 	if(!uv_is_closing((uv_handle_t *)req)) {
 		uv_poll_stop(req);
 		uv_close((uv_handle_t *)req, close_cb);
+	}
+
+	if(!uv_is_closing((uv_handle_t *)request->timer_req)) {
+		uv_close((uv_handle_t *)request->timer_req, close_cb);
 	}
 
 	if(request != NULL) {
@@ -545,17 +556,17 @@ static void timeout(uv_timer_t *req) {
 	struct request_t *request = req->data;
 	void (*callback)(int, char *, int, char *, void *) = request->callback;
 	void *userdata = request->userdata;
-	int called = request->called;
 	if(request->timer_req != NULL) {
 		uv_timer_stop(request->timer_req);
 	}
-	http_client_close(request->poll_req);
-	if(callback != NULL && called == 0) {
+	if(callback != NULL && request->called == 0) {
+		request->called = 1;
 		callback(408, NULL, 0, NULL, userdata);
 	}
+	http_client_close(request->poll_req);
 }
 
-static void read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
+static ssize_t read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 	/*
 	 * Make sure we execute in the main thread
 	 */
@@ -567,37 +578,34 @@ static void read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
 	char *header = NULL, *p = NULL;
 	const char *a = NULL, *b = NULL;
 	int pos = 0;
+	ssize_t bytes = 0;
 
-	if(*nread > 0) {
-		buf[*nread] = '\0';
-	}
-	/*
-	 * FIXME: Use io read buf instead of new buffer
-	 */
-	if(*nread > 0) {
-		if(request->gotheader == 0 && (p = strstr(buf, "\r\n\r\n")) != NULL) {
-			pos = p-buf;
+	if(nread > 0) {
+		if(request->gotheader == 0 && (p = strstr(&buf[bytes], "\r\n\r\n")) != NULL) {
+			pos = p-&buf[bytes];
 			if((header = MALLOC(pos+1)) == NULL) {
 				OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
 			}
-			strncpy(header, buf, pos);
+			strncpy(header, &buf[bytes], pos);
 			header[pos] = '\0';
 			request->gotheader = 1;
-			*nread -= pos+4;
-			memmove(buf, &buf[pos+4], *nread);
-			buf[*nread] = '\0';
+
+			bytes = pos + 4;
 
 			struct connection_t c;
 			char *location = NULL;
-			http_parse_request(header, &c);
+			ssize_t foo = 0;
+			memset(&c, 0, sizeof(struct connection_t));
+			http_parse_request(header, &foo, &c);
 			if(c.status_code == 301 && (location = (char *)http_get_header(&c, "Location")) != NULL) {
 				uv_timer_stop(request->timer_req);
 				if(request->callback != NULL && request->called == 0) {
 					request->called = 1;
 					request->callback(c.status_code, location, strlen(location), NULL, request->userdata);
 				}
+				http_free_connection(&c);
 				FREE(header);
-				return;
+				return 0;
 			}
 			request->status_code = c.status_code;
 			if((a = http_get_header(&c, "Content-Type")) != NULL || (b = http_get_header(&c, "Content-type")) != NULL) {
@@ -629,6 +637,7 @@ static void read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
 					request->has_chunked = 1;
 				}
 			}
+			http_free_connection(&c);
 			FREE(header);
 			/*
 			 * 0 bytes left is not always an indication
@@ -638,7 +647,7 @@ static void read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
 			 * when chunked data is announced, we wait
 			 * for it.
 			 */
-			if(*nread == 0 && request->chunked == 0) {
+			if(bytes == nread && request->chunked == 0) {
 				uv_timer_stop(request->timer_req);
 				if(request->callback != NULL && request->called == 0) {
 					request->called = 1;
@@ -647,22 +656,23 @@ static void read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
 				}
 			}
 		}
+
 		if(request->chunked == 1) {
-			process_chunk(&buf, &(*nread), request);
-		} else if(*nread > 0) {
-			if((request->content = REALLOC(request->content, request->bytes_read+(*nread)+1)) == NULL) {
+			process_chunk(buf, &bytes, nread, request);
+		} else if(bytes < nread) {
+			if((request->content = REALLOC(request->content, request->bytes_read+(nread-bytes)+1)) == NULL) {
 				OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
 			}
 			/*
 			 * Prevent uninitialised values in valgrind
 			 */
-			memset(&request->content[request->bytes_read], 0, *nread+1);
-			memcpy(&request->content[request->bytes_read], buf, *nread);
-			request->bytes_read += *nread;
-			*nread = 0;
+			memset(&request->content[request->bytes_read], 0, (nread-bytes)+1);
+			memcpy(&request->content[request->bytes_read], &buf[bytes], (nread-bytes));
+			request->bytes_read += (nread - bytes);
+			bytes = nread;
 		}
 
-		if(strcmp(buf, "0\r\n\r\n") == 0) {
+		if(strncmp(&buf[bytes], "0\r\n\r\n", 5) == 0) {
 			request->reading = 0;
 			request->chunked = 0;
 			request->content[request->bytes_read] = '\0';
@@ -686,11 +696,13 @@ static void read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
 
 	if(request->reading == 1) {
 		uv_custom_read(req);
-		return;
 	}
+
+	return bytes;
 
 close:
 	uv_custom_close(req);
+	return bytes;
 }
 
 static void write_cb(uv_poll_t *req) {
@@ -739,8 +751,12 @@ static void write_cb(uv_poll_t *req) {
 	}
 }
 
-char *http_process(int type, char *url, const char *conttype, char *post, void (*callback)(int, char *, int, char *, void *), void *userdata) {
-	struct request_t *request = NULL;
+static void thread_free(uv_work_t *req, int status) {
+	FREE(req);
+}
+
+static void thread(uv_work_t *req) {
+	struct request_t *request = req->data;
 	struct uv_custom_poll_t *custom_poll_data = NULL;
 	struct sockaddr_in addr4;
 	struct sockaddr_in6 addr6;
@@ -767,127 +783,130 @@ char *http_process(int type, char *url, const char *conttype, char *post, void (
 	}
 #endif
 
-	memset(&addr4, 0, sizeof(addr4));
-	memset(&addr6, 0, sizeof(addr6));
-	if(prepare_request(&request, type, url, conttype, post, callback, userdata) == 0) {
-		int inet = host2ip(request->host, &ip);
-		switch(inet) {
-			case AF_INET: {
-				memset(&addr4, '\0', sizeof(struct sockaddr_in));
-				r = uv_ip4_addr(ip, request->port, &addr4);
-				if(r != 0) {
-					/*LCOV_EXCL_START*/
-					logprintf(LOG_ERR, "uv_ip4_addr: %s", uv_strerror(r));
-					goto freeuv;
-					/*LCOV_EXCL_END*/
-				}
-			} break;
-			case AF_INET6: {
-				memset(&addr6, '\0', sizeof(struct sockaddr_in6));
-				r = uv_ip6_addr(ip, request->port, &addr6);
-				if(r != 0) {
-					/*LCOV_EXCL_START*/
-					logprintf(LOG_ERR, "uv_ip6_addr: %s", uv_strerror(r));
-					goto freeuv;
-					/*LCOV_EXCL_END*/
-				}
-			} break;
-			default: {
+	memset(&addr4, '\0', sizeof(struct sockaddr_in));
+	memset(&addr6, '\0', sizeof(struct sockaddr_in6));
+
+	int inet = host2ip(request->host, &ip);
+	switch(inet) {
+		case AF_INET: {
+			memset(&addr4, '\0', sizeof(struct sockaddr_in));
+			r = uv_ip4_addr(ip, request->port, &addr4);
+			if(r != 0) {
 				/*LCOV_EXCL_START*/
-				logprintf(LOG_ERR, "host2ip");
+				logprintf(LOG_ERR, "uv_ip4_addr: %s", uv_strerror(r));
 				goto freeuv;
 				/*LCOV_EXCL_END*/
-			} break;
-		}
-		FREE(ip);
-
-		/*
-		 * Partly bypass libuv in case of ssl connections
-		 */
-		if((request->fd = socket(inet, SOCK_STREAM, 0)) < 0){
-			/*LCOV_EXCL_START*/
-			logprintf(LOG_ERR, "socket: %s", strerror(errno));
-			goto freeuv;
-			/*LCOV_EXCL_STOP*/
-		}
-
-#ifdef _WIN32
-		unsigned long on = 1;
-		ioctlsocket(request->fd, FIONBIO, &on);
-#else
-		long arg = fcntl(request->fd, F_GETFL, NULL);
-		fcntl(request->fd, F_SETFL, arg | O_NONBLOCK);
-#endif
-
-		switch(inet) {
-			case AF_INET: {
-				r = connect(request->fd, (struct sockaddr *)&addr4, sizeof(addr4));
-			} break;
-			case AF_INET6: {
-				r = connect(request->fd, (struct sockaddr *)&addr6, sizeof(addr6));
-			} break;
-			default: {
-			} break;
-		}
-
-		if(r < 0) {
-#ifdef _WIN32
-			if(!(WSAGetLastError() == WSAEWOULDBLOCK || WSAGetLastError() == WSAEISCONN)) {
-#else
-			if(!(errno == EINPROGRESS || errno == EISCONN)) {
-#endif
-				/*LCOV_EXCL_START*/
-				logprintf(LOG_ERR, "connect: %s", strerror(errno));
-				goto freeuv;
-				/*LCOV_EXCL_STOP*/
 			}
-		}
-
-		request->poll_req = NULL;
-		if((request->poll_req = MALLOC(sizeof(uv_poll_t))) == NULL) {
-			OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
-		}
-		if((request->timer_req = MALLOC(sizeof(uv_timer_t))) == NULL) {
-			OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
-		}
-		uv_custom_poll_init(&custom_poll_data, request->poll_req, (void *)request);
-		custom_poll_data->is_ssl = request->is_ssl;
-		custom_poll_data->write_cb = write_cb;
-		custom_poll_data->read_cb = read_cb;
-		custom_poll_data->close_cb = poll_close_cb;
-		if((custom_poll_data->host = STRDUP(request->host)) == NULL) {
-			OUT_OF_MEMORY
-		}
-
-		request->timer_req->data = request;
-
-		r = uv_poll_init_socket(uv_default_loop(), request->poll_req, request->fd);
-		if(r != 0) {
+		} break;
+		case AF_INET6: {
+			memset(&addr6, '\0', sizeof(struct sockaddr_in6));
+			r = uv_ip6_addr(ip, request->port, &addr6);
+			if(r != 0) {
+				/*LCOV_EXCL_START*/
+				logprintf(LOG_ERR, "uv_ip6_addr: %s", uv_strerror(r));
+				goto freeuv;
+				/*LCOV_EXCL_END*/
+			}
+		} break;
+		default: {
 			/*LCOV_EXCL_START*/
-			logprintf(LOG_ERR, "uv_poll_init_socket: %s", uv_strerror(r));
-			FREE(request->poll_req);
+			logprintf(LOG_ERR, "host2ip");
 			goto freeuv;
-			/*LCOV_EXCL_STOP*/
-		}
+			/*LCOV_EXCL_END*/
+		} break;
+	}
+	FREE(ip);
 
-		uv_timer_init(uv_default_loop(), request->timer_req);
-		uv_timer_start(request->timer_req, (void (*)(uv_timer_t *))timeout, 3000, 0);
-
-		http_client_add(request->poll_req, custom_poll_data);
-		request->steps = STEP_WRITE;
-		uv_custom_write(request->poll_req);
+	/*
+	 * Partly bypass libuv in case of ssl connections
+	 */
+	if((request->fd = socket(inet, SOCK_STREAM, 0)) < 0){
+		/*LCOV_EXCL_START*/
+		logprintf(LOG_ERR, "socket: %s", strerror(errno));
+		goto freeuv;
+		/*LCOV_EXCL_STOP*/
 	}
 
-	return NULL;
+#ifdef _WIN32
+	unsigned long on = 1;
+	ioctlsocket(request->fd, FIONBIO, &on);
+#else
+	long arg = fcntl(request->fd, F_GETFL, NULL);
+	fcntl(request->fd, F_SETFL, arg | O_NONBLOCK);
+#endif
+
+	switch(inet) {
+		case AF_INET: {
+			r = connect(request->fd, (struct sockaddr *)&addr4, sizeof(addr4));
+		} break;
+		case AF_INET6: {
+			r = connect(request->fd, (struct sockaddr *)&addr6, sizeof(addr6));
+		} break;
+		default: {
+		} break;
+	}
+
+	if(r < 0) {
+#ifdef _WIN32
+		if(!(WSAGetLastError() == WSAEWOULDBLOCK || WSAGetLastError() == WSAEISCONN)) {
+#else
+		if(!(errno == EINPROGRESS || errno == EISCONN)) {
+#endif
+			/*LCOV_EXCL_START*/
+			logprintf(LOG_ERR, "connect: %s", strerror(errno));
+			goto freeuv;
+			/*LCOV_EXCL_STOP*/
+		}
+	}
+
+	request->poll_req = NULL;
+	if((request->poll_req = MALLOC(sizeof(uv_poll_t))) == NULL) {
+		OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
+	}
+	if((request->timer_req = MALLOC(sizeof(uv_timer_t))) == NULL) {
+		OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
+	}
+	uv_custom_poll_init(&custom_poll_data, request->poll_req, (void *)request);
+	custom_poll_data->is_ssl = request->is_ssl;
+	custom_poll_data->write_cb = write_cb;
+	custom_poll_data->read_cb = read_cb;
+	custom_poll_data->close_cb = poll_close_cb;
+	if((custom_poll_data->host = STRDUP(request->host)) == NULL) {
+		OUT_OF_MEMORY
+	}
+
+	request->timer_req->data = request;
+
+	r = uv_poll_init_socket(uv_default_loop(), request->poll_req, request->fd);
+	if(r != 0) {
+		/*LCOV_EXCL_START*/
+		logprintf(LOG_ERR, "uv_poll_init_socket: %s", uv_strerror(r));
+		FREE(request->poll_req);
+		goto freeuv;
+		/*LCOV_EXCL_STOP*/
+	}
+
+	uv_timer_init(uv_default_loop(), request->timer_req);
+	uv_update_time(uv_default_loop());
+	uv_timer_start(request->timer_req, (void (*)(uv_timer_t *))timeout, 3000, 0);
+
+	http_client_add(request->poll_req, custom_poll_data);
+	request->steps = STEP_WRITE;
+	uv_custom_write(request->poll_req);
+
+	return;
 
 freeuv:
 	if(request->timer_req != NULL) {
 		uv_timer_stop(request->timer_req);
 	}
-	if(request->callback != NULL && request->called == 0) {
-		request->called = 1;
-		request->callback(404, NULL, 0, 0, request->userdata);
-	}
+	/*
+	 * 404 should be given by an available server
+	 */
+	// if(request->callback != NULL && request->called == 0) {
+		// request->called = 1;
+		// request->callback(404, NULL, 0, 0, request->userdata);
+	// }
 	FREE(request->uri);
 	FREE(request->host);
 
@@ -899,13 +918,41 @@ freeuv:
 #endif
 	}
 	FREE(request);
-	return NULL;
+	return ;
 }
 
-char *http_get_content(char *url, void (*callback)(int, char *, int, char *, void *), void *userdata) {
+int http_process(int type, char *url, const char *conttype, char *post, void (*callback)(int, char *, int, char *, void *), void *userdata) {
+	struct request_t *request = NULL;
+	char *ip = NULL;
+
+	if(prepare_request(&request, type, url, conttype, post, callback, userdata) == 0) {
+		int inet = host2ip(request->host, &ip);
+		if(inet == -1) {
+			FREE(request->uri);
+			FREE(request->host);
+			FREE(request);
+			return -1;
+		}
+		FREE(ip);
+		uv_work_t *work_req = NULL;
+		if((work_req = MALLOC(sizeof(uv_work_t))) == NULL) {
+			OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
+		}
+		work_req->data = request;
+		uv_queue_work_s(work_req, "http", 1, thread, thread_free);
+		return 0;
+	}
+
+	FREE(request->uri);
+	FREE(request->host);
+	FREE(request);
+	return -1;
+}
+
+int http_get_content(char *url, void (*callback)(int, char *, int, char *, void *), void *userdata) {
 	return http_process(HTTP_GET, url, NULL, NULL, callback, userdata);
 }
 
-char *http_post_content(char *url, const char *conttype, char *post, void (*callback)(int, char *, int, char *, void *), void *userdata) {
+int http_post_content(char *url, const char *conttype, char *post, void (*callback)(int, char *, int, char *, void *), void *userdata) {
 	return http_process(HTTP_POST, url, conttype, post, callback, userdata);
 }

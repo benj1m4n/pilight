@@ -16,17 +16,17 @@
 #include "../libs/libuv/uv.h"
 
 typedef struct connection_t {
-	int fd;
-	char *request;
-  const char *request_method;
-  const char *uri;
-  const char *http_version;
+  int fd;
+  char *request;
+  char *request_method;
+  char *uri;
+  char *http_version;
   const char *query_string;
 
   int num_headers;
   struct headers {
-    const char *name;
-    const char *value;
+    char *name;
+    char *value;
   } http_headers[30];
 
   char *content;
@@ -34,21 +34,21 @@ typedef struct connection_t {
   char mimetype[255];
 
   int is_websocket;
-	int ping;
+  struct timespec ping;
   int status_code;
-	void *connection_param;
+  void *connection_param;
   void *callback_param;
   unsigned int flags;
-	unsigned short timer;
+  unsigned short timer;
 
-	int file_fd;
+  int file_fd;
 
-	char buffer[WEBSERVER_CHUNK_SIZE];
+  char buffer[WEBSERVER_CHUNK_SIZE];
 
 #ifdef WEBSERVER_HTTPS
-	int is_ssl;
-	int handshake;
-	mbedtls_ssl_context ssl;
+  int is_ssl;
+  int handshake;
+  mbedtls_ssl_context ssl;
 #endif
 } connection_t;
 
@@ -56,8 +56,9 @@ int webserver_gc(void);
 int webserver_start(void);
 void *webserver_broadcast(void *);
 void webserver_create_header(char **, const char *, char *, unsigned long);
-int http_parse_request(char *, struct connection_t *);
+int http_parse_request(const char *, ssize_t *, struct connection_t *);
 const char *http_get_header(struct connection_t *, const char *);
+void http_free_connection(struct connection_t *);
 void *webserver_clientize(void *param);
 
 #endif

@@ -101,3 +101,6 @@ void init(void) {
 	genericScreenInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *generic_screen;

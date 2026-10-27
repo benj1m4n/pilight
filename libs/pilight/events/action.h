@@ -21,7 +21,7 @@ struct event_action_args_t {
 	struct varcont_t **var;
 	int nrvalues;
 	struct event_action_args_t *next;
-} event_action_args_t;
+};
 
 struct event_action_args_t *event_action_add_argument(struct event_action_args_t *, char *, struct varcont_t *);
 int event_action_check_arguments(char *, struct event_action_args_t *);

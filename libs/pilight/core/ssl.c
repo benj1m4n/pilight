@@ -104,7 +104,12 @@ void ssl_init(void) {
 
 	mbedtls_pk_init(&ssl_pk_key);
 	if(server_success == 0) {
-		if((ret = mbedtls_pk_parse_keyfile(&ssl_pk_key, pemfile, NULL)) != 0) {
+#if MBEDTLS_VERSION_NUMBER >= 0x03000000
+		ret = mbedtls_pk_parse_keyfile(&ssl_pk_key, pemfile, NULL, mbedtls_ctr_drbg_random, &ssl_ctr_drbg);
+#else
+		ret = mbedtls_pk_parse_keyfile(&ssl_pk_key, pemfile, NULL);
+#endif
+		if(ret != 0) {
 			mbedtls_strerror(ret, (char *)&buffer, BUFFER_SIZE);
 			logprintf(LOG_NOTICE, "mbedtls_pk_parse_keyfile failed: %s", buffer);
 			server_success = -1;
@@ -137,3 +142,12 @@ void ssl_gc(void) {
 	mbedtls_pk_free(&ssl_pk_key);
 	mbedtls_ssl_cache_free(&ssl_cache);
 }
+
+/* single definitions (previously tentative definitions in the header) */
+mbedtls_ssl_cache_context ssl_cache;
+struct mbedtls_ssl_config ssl_client_conf;
+mbedtls_ctr_drbg_context ssl_ctr_drbg;
+mbedtls_entropy_context ssl_entropy;
+mbedtls_pk_context ssl_pk_key;
+struct mbedtls_ssl_config ssl_server_conf;
+mbedtls_x509_crt ssl_server_crt;

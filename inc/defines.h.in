@@ -20,6 +20,7 @@
 #define _DEFINES_H_
 
 #cmakedefine WEBSERVER
+#cmakedefine MQTT
 #cmakedefine EVENTS
 
 #define PILIGHT_VERSION					"8.1.5"
@@ -45,6 +46,13 @@
 	#define WEBGUI_WEBSOCKETS			1
 	#cmakedefine WEBSERVER_HTTPS	1
 #endif
+
+#ifdef MQTT
+	#define MQTT_PORT							1883
+	#define MQTT_ENABLE						1
+#endif
+
+#define TCP_BACKLOG							511 // comparable to apache, nginx, etc.
 
 #define MAX_CLIENTS							30
 #define BUFFER_SIZE							1025

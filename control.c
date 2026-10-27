@@ -38,8 +38,6 @@
 static char *lua_root = LUA_ROOT;
 
 int main(int argc, char **argv) {
-	// memtrack();
-
 	atomicinit();
 	struct options_t *options = NULL;
 	struct ssdp_list_t *ssdp_list = NULL;
@@ -145,9 +143,8 @@ int main(int argc, char **argv) {
 		goto close;
 	}
 
-	if(device == NULL || state == NULL ||
-	   strlen(device) == 0 || strlen(state) == 0) {
-		printf("Usage: %s -d device -s state\n", progname);
+	if(device == NULL && strlen(device) == 0) {
+		printf("Usage: %s -d device [options]\n", progname);
 		goto close;
 	}
 
@@ -299,12 +296,14 @@ int main(int argc, char **argv) {
 								}
 							}
 
-							if(devices_valid_state(device, state) == 0) {
-								json_append_member(jcode, "state", json_mkstring(state));
-							} else {
-								logprintf(LOG_ERR, "\"%s\" is an invalid state for device \"%s\"", state, device);
-								json_delete(json);
-								goto close;
+							if(state != NULL && strlen(state) > 0) {
+								if(devices_valid_state(device, state) == 0) {
+									json_append_member(jcode, "state", json_mkstring(state));
+								} else {
+									logprintf(LOG_ERR, "\"%s\" is an invalid state for device \"%s\"", state, device);
+									json_delete(json);
+									goto close;
+								}
 							}
 
 							if(has_values == 1) {
@@ -355,7 +354,6 @@ close:
 	threads_gc();
 	gc_clear();
 	FREE(progname);
-	xfree();
 
 #ifdef _WIN32
 	WSACleanup();

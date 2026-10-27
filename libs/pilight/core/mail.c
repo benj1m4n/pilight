@@ -78,6 +78,7 @@ typedef struct request_t {
 	const char *pass;
 	unsigned short port;
 
+	int is_ssl;
 	char *content;
 	int content_len;
 	int step;
@@ -113,6 +114,8 @@ static void abort_cb(uv_poll_t *req) {
 	struct request_t *request = custom_poll_data->data;
 	int fd = -1, r = 0;
 
+	char buffer[BUFFER_SIZE] = { 0 };
+
 	if((r = uv_fileno((uv_handle_t *)req, (uv_os_fd_t *)&fd)) != 0) {
 		logprintf(LOG_ERR, "uv_fileno: %s", uv_strerror(r)); /*LCOV_EXCL_LINE*/
 	}
@@ -126,7 +129,8 @@ static void abort_cb(uv_poll_t *req) {
 		shutdown(fd, SD_BOTH);
 		closesocket(fd);
 #else
-		shutdown(fd, SHUT_RDWR);
+		shutdown(fd, SHUT_WR);
+		while(recv(fd, buffer, BUFFER_SIZE, 0) > 0);
 		close(fd);
 #endif
 	}
@@ -141,6 +145,7 @@ static void abort_cb(uv_poll_t *req) {
 	}
 
 	if(request != NULL) {
+		FREE(request->host);
 		FREE(request);
 	}
 }
@@ -155,7 +160,7 @@ static void custom_close_cb(uv_poll_t *req) {
 	abort_cb(req);
 }
 
-static void read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
+static ssize_t read_cb(uv_poll_t *req, ssize_t nread, const char *buf) {
 	/*
 	 * Make sure we execute in the main thread
 	 */
@@ -166,35 +171,32 @@ static void read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
 	struct request_t *request = custom_poll_data->data;
 	char buffer[BUFFER_SIZE], testme[256], ch = 0;
 	int val = 0, n = 0;
+	ssize_t bytes = 0;
 	memset(&buffer, '\0', BUFFER_SIZE);
 
-	if(*nread == -1) {
+	if(nread == -1) {
 		/*
 		 * We are disconnected
 		 */
 		abort_cb(req);
-		return;
-	}
-
-	if(*nread > 0) {
-		buf[*nread] = '\0';
+		return bytes;
 	}
 
 	switch(request->step) {
 		case SMTP_STEP_RECV_WELCOME: {
-			if(strncmp(buf, "220", 3) != 0) {
+			if(strncmp(&buf[bytes], "220", 3) != 0) {
 				uv_custom_close(req);
-				return;
+				return bytes;
 			}
 			request->bytes_read = 0;
-			*nread = 0;
+			bytes = nread;
 			request->step = SMTP_STEP_SEND_HELLO;
 			uv_custom_write(req);
 		} break;
 		case SMTP_STEP_RECV_HELLO: {
 			char **array = NULL;
 			int i = 0;
-			n = explode(buf, "\r\n", &array);
+			n = explode((char *)&buf[bytes], "\r\n", &array);
 			for(i=0;i<n;i++) {
 				if(sscanf(array[i], "%d%c%[^\r\n]", &val, &ch, testme) == 0) {
 					continue;
@@ -214,7 +216,7 @@ static void read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
 					array_free(&array, n);
 					uv_custom_close(req);
 					logprintf(LOG_NOTICE, "SMTP: EHLO error");
-					return;
+					return bytes;
 				}
 				if(val == 250 && ch == 32) {
 					request->reading = 0;
@@ -223,7 +225,7 @@ static void read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
 						logprintf(LOG_NOTICE, "SMTP: no supported authentication method");
 						array_free(&array, n);
 						uv_custom_close(req);
-						return;
+						return bytes;
 					}
 					if(request->authtype == STARTTLS) {
 						request->step = SMTP_STEP_SEND_STARTTLS;
@@ -237,80 +239,80 @@ static void read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
 			array_free(&array, n);
 			if(request->reading == 1) {
 				uv_custom_read(req);
-				return;
+				return bytes;
 			}
-			*nread = 0;
+			bytes = nread;
 		} break;
 		case SMTP_STEP_RECV_AUTH: {
-			if(strncmp(buf, "235", 3) == 0) {
+			if(strncmp(&buf[bytes], "235", 3) == 0) {
 				request->step = SMTP_STEP_SEND_FROM;
 			}
-			if(strncmp(buf, "451", 3) == 0) {
+			if(strncmp(&buf[bytes], "451", 3) == 0) {
 				logprintf(LOG_NOTICE, "SMTP: protocol violation while authenticating");
 				uv_custom_close(req);
-				return;
+				return bytes;
 			}
-			if(strncmp(buf, "501", 3) == 0) {
+			if(strncmp(&buf[bytes], "501", 3) == 0) {
 				logprintf(LOG_NOTICE, "SMTP: improperly base64 encoded user/password");
 				uv_custom_close(req);
-				return;
+				return bytes;
 			}
-			if(strncmp(buf, "535", 3) == 0) {
+			if(strncmp(&buf[bytes], "535", 3) == 0) {
 				logprintf(LOG_NOTICE, "SMTP: authentication failed: wrong user/password");
 				uv_custom_close(req);
-				return;
+				return bytes;
 			}
-			*nread = 0;
+			bytes = nread;
 			request->step = SMTP_STEP_SEND_FROM;
 			uv_custom_write(req);
 		} break;
 		case SMTP_STEP_RECV_FROM: {
-			if(strncmp(buf, "250", 3) != 0) {
+			if(strncmp(&buf[bytes], "250", 3) != 0) {
 				uv_custom_close(req);
-				return;
+				return bytes;
 			}
 			request->bytes_read = 0;
-			*nread = 0;
+			bytes = nread;
 			request->step = SMTP_STEP_SEND_TO;
 			uv_custom_write(req);
 		} break;
 		case SMTP_STEP_RECV_TO: {
-			if(strncmp(buf, "250", 3) != 0) {
+			if(strncmp(&buf[bytes], "250", 3) != 0) {
 				uv_custom_close(req);
-				return;
+				return bytes;
 			}
 			request->bytes_read = 0;
-			*nread = 0;
+			bytes = nread;
 			request->step = SMTP_STEP_SEND_DATA;
 			uv_custom_write(req);
 		} break;
 		case SMTP_STEP_RECV_DATA: {
 			if(strncmp(buf, "354", 3) != 0) {
 				uv_custom_close(req);
-				return;
+				return bytes;
 			}
 			request->bytes_read = 0;
-			*nread = 0;
+			bytes = nread;
 			request->step = SMTP_STEP_SEND_BODY;
 			uv_custom_write(req);
 		} break;
 		case SMTP_STEP_RECV_BODY: {
 			if(strncmp(buf, "250", 3) != 0) {
 				uv_custom_close(req);
-				return;
+				return bytes;
 			}
 			request->bytes_read = 0;
-			*nread = 0;
+			bytes = nread;
 			request->step = SMTP_STEP_SEND_RESET;
 			uv_custom_write(req);
 		} break;
 		case SMTP_STEP_RECV_RESET: {
 			if(strncmp(buf, "250", 3) != 0) {
 				uv_custom_close(req);
-				return;
+				return bytes;
 			}
 			request->bytes_read = 0;
-			*nread = 0;
+			bytes = nread;
 			request->step = SMTP_STEP_SEND_QUIT;
 			uv_custom_write(req);
 		} break;
@@ -326,19 +328,20 @@ static void read_cb(uv_poll_t *req, ssize_t *nread, char *buf) {
 			// }
 			// uv_custom_poll_free(custom_poll_data);
 			// FREE(request);
-			return;
+			return bytes;
 		} break;
 		case SMTP_STEP_RECV_STARTTLS: {
-			if(strncmp(buf, "220", 3) == 0) {
+			if(strncmp(&buf[bytes], "220", 3) == 0) {
 				custom_poll_data->is_ssl = 1;
 
 				request->bytes_read = 0;
-				*nread = 0;
+				bytes = nread;
 				request->step = SMTP_STEP_SEND_HELLO;
 				uv_custom_write(req);
 			}
 		} break;
 	}
+	return bytes;
 }
 
 static void push_data(uv_poll_t *req, int step) {
@@ -527,46 +530,17 @@ static void write_cb(uv_poll_t *req) {
 	}
 }
 
-int sendmail(char *host, char *login, char *pass, unsigned short port, int is_ssl, struct mail_t *mail, void (*callback)(int, struct mail_t *)) {
-	struct request_t *request = NULL;
+static void thread_free(uv_work_t *req, int status) {
+	FREE(req);
+}
+
+static void thread(uv_work_t *req) {
+	struct request_t *request = req->data;
 	struct uv_custom_poll_t *custom_poll_data = NULL;
 	struct sockaddr_in addr4;
 	struct sockaddr_in6 addr6;
 	char *ip = NULL;
 	int type = 0, sockfd = 0, r = 0;
-
-	if(mail->from == NULL) {
-		logprintf(LOG_ERR, "SMTP: sender not set");
-		return -1;
-	}
-	if(mail->subject == NULL) {
-		logprintf(LOG_ERR, "SMTP: subject not set");
-		return -1;
-	}
-	if(mail->message == NULL) {
-		logprintf(LOG_ERR, "SMTP: message not set");
-		return -1;
-	}
-	if(mail->to == NULL) {
-		logprintf(LOG_ERR, "SMTP: recipient not set");
-		return -1;
-	}
-	if(strcmp(mail->message, ".") == 0) {
-		logprintf(LOG_ERR, "SMTP: message cannot be a single .");
-		return -1;
-	}
-
-	if((request = MALLOC(sizeof(struct request_t))) == NULL) {
-		OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
-	}
-	memset(request, 0, sizeof(struct request_t));
-	request->host = host;
-	request->login = login;
-	request->pass = pass;
-	request->port = port;
-	request->mail = mail;
-	request->authtype = UNSUPPORTED;
-	request->callback = callback;
 
 #ifdef _WIN32
 	WSADATA wsa;
@@ -577,11 +551,11 @@ int sendmail(char *host, char *login, char *pass, unsigned short port, int is_ss
 	}
 #endif
 
-	type = host2ip(host, &ip);
+	type = host2ip((char *)request->host, &ip);
 	switch(type) {
 		case AF_INET: {
 			memset(&addr4, '\0', sizeof(struct sockaddr_in));
-			r = uv_ip4_addr(ip, port, &addr4);
+			r = uv_ip4_addr(ip, request->port, &addr4);
 			if(r != 0) {
 				/*LCOV_EXCL_START*/
 				logprintf(LOG_ERR, "uv_ip4_addr: %s", uv_strerror(r));
@@ -591,7 +565,7 @@ int sendmail(char *host, char *login, char *pass, unsigned short port, int is_ss
 		} break;
 		case AF_INET6: {
 			memset(&addr6, '\0', sizeof(struct sockaddr_in6));
-			r = uv_ip6_addr(ip, port, &addr6);
+			r = uv_ip6_addr(ip, request->port, &addr6);
 			if(r != 0) {
 				/*LCOV_EXCL_START*/
 				logprintf(LOG_ERR, "uv_ip6_addr: %s", uv_strerror(r));
@@ -651,12 +625,12 @@ int sendmail(char *host, char *login, char *pass, unsigned short port, int is_ss
 
 	uv_custom_poll_init(&custom_poll_data, poll_req, (void *)request);
 
-	custom_poll_data->is_ssl = is_ssl;
+	custom_poll_data->is_ssl = request->is_ssl;
 
 	if(custom_poll_data->is_ssl == 1 && ssl_client_init_status() == -1) {
 		logprintf(LOG_ERR, "secure e-mails require a properly initialized SSL library");
 		abort_cb(poll_req);
-		return -1;
+		return;
 	}
 	custom_poll_data->write_cb = write_cb;
 	custom_poll_data->read_cb = read_cb;
@@ -674,12 +648,13 @@ int sendmail(char *host, char *login, char *pass, unsigned short port, int is_ss
 	request->step = SMTP_STEP_RECV_WELCOME;
 	uv_custom_write(poll_req);
 
-	return 0;
+	return;
 
 free:
 	if(request != NULL && request->callback != NULL) {
 		request->callback(-1, request->mail);
 	}
+	FREE(request->host);
 	FREE(request);
 	if(custom_poll_data != NULL) {
 		uv_custom_poll_free(custom_poll_data);
@@ -691,5 +666,74 @@ free:
 		close(sockfd);
 #endif
 	}
-	return -1;
+	return;
+}
+
+static void error(uv_work_t *req) {
+	struct request_t *request = req->data;
+
+	if(request != NULL && request->callback != NULL) {
+		request->callback(-1, request->mail);
+	}
+	FREE(request->host);
+	FREE(request);
+}
+
+int sendmail(char *host, char *login, char *pass, unsigned short port, int is_ssl, struct mail_t *mail, void (*callback)(int, struct mail_t *)) {
+	struct request_t *request = NULL;
+	char *ip = NULL;
+
+	if(mail->from == NULL) {
+		logprintf(LOG_ERR, "SMTP: sender not set");
+		return -1;
+	}
+	if(mail->subject == NULL) {
+		logprintf(LOG_ERR, "SMTP: subject not set");
+		return -1;
+	}
+	if(mail->message == NULL) {
+		logprintf(LOG_ERR, "SMTP: message not set");
+		return -1;
+	}
+	if(mail->to == NULL) {
+		logprintf(LOG_ERR, "SMTP: recipient not set");
+		return -1;
+	}
+	if(strcmp(mail->message, ".") == 0) {
+		logprintf(LOG_ERR, "SMTP: message cannot be a single .");
+		return -1;
+	}
+
+	if((request = MALLOC(sizeof(struct request_t))) == NULL) {
+		OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
+	}
+	memset(request, 0, sizeof(struct request_t));
+
+	if((request->host = STRDUP(host)) == NULL) {
+		OUT_OF_MEMORY
+	}
+	request->login = login;
+	request->pass = pass;
+	request->port = port;
+	request->mail = mail;
+	request->is_ssl = is_ssl;
+	request->authtype = UNSUPPORTED;
+	request->callback = callback;
+
+	uv_work_t *work_req = NULL;
+	if((work_req = MALLOC(sizeof(uv_work_t))) == NULL) {
+		OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
+	}
+	work_req->data = request;
+
+	int type = host2ip(host, &ip);
+	if(type == -1) {
+		uv_queue_work_s(work_req, "mail", 1, error, thread_free);
+		return -1;
+	}
+	FREE(ip);
+
+	uv_queue_work_s(work_req, "mail", 1, thread, thread_free);
+
+	return 0;
 }

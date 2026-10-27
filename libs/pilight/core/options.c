@@ -569,6 +569,8 @@ void options_merge(struct options_t **a, struct options_t **b) {
 		if(optnode == NULL) {
 			OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
 		}
+		/* "set" and "number_" were left uninitialised before */
+		memset(optnode, 0, sizeof(struct options_t));
 		if((optnode->id = STRDUP(temp->id)) == NULL) {
 			OUT_OF_MEMORY
 		}

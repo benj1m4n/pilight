@@ -271,3 +271,6 @@ void init(void) {
 	arpingInit();
 }
 #endif
+
+/* single definition (previously a tentative definition in the header) */
+struct protocol_t *arping;

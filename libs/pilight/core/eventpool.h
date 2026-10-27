@@ -32,7 +32,7 @@
 enum eventpool_threads_t {
 	EVENTPOOL_NO_THREADS,
 	EVENTPOOL_THREADED
-} eventpool_threads_t;
+};
 
 #define EVENTPOOL_STAGE_SOCKET 						0
 #define EVENTPOOL_STAGE_CONNECT 					1
@@ -104,7 +104,9 @@ enum eventpool_threads_t {
 #define REASON_ARP_LOST_DEVICE				35
 #define REASON_ARP_CHANGED_DEVICE			36
 #define REASON_LOG										37
-#define REASON_END										38
+#define REASON_MQTT_CLIENT_REMOVED    38
+#define REASON_MQTT_CLIENT_TIMEOUT    39
+#define REASON_END										40
 
 typedef struct threadpool_data_t {
 	int reason;
@@ -160,6 +162,7 @@ struct uv_custom_poll_t {
 	int doclose;
 	int started;
 	int action;
+	int threadid;
 
 	char *host;
 
@@ -170,7 +173,7 @@ struct uv_custom_poll_t {
 
 	void (*write_cb)(uv_poll_t *);
 	void (*close_cb)(uv_poll_t *);
-	void (*read_cb)(uv_poll_t *, ssize_t *, char *);
+	ssize_t (*read_cb)(uv_poll_t *, ssize_t, const char *);
 
 	struct {
 		int init;
@@ -180,7 +183,7 @@ struct uv_custom_poll_t {
 
   struct iobuf_t recv_iobuf;
   struct iobuf_t send_iobuf;
-} uv_custom_poll_t;
+};
 
 void eventpool_callback_remove(struct eventpool_listener_t *node);
 void *eventpool_callback(int, void *(*)(int, void *, void *), void *);
@@ -188,7 +191,10 @@ void eventpool_trigger(int, void *(*)(void *), void *);
 void eventpool_init(enum eventpool_threads_t);
 int eventpool_gc(void);
 
+void iobuf_free(struct iobuf_t *iobuf);
+void iobuf_init(struct iobuf_t *iobuf, size_t initial_size);
 void iobuf_remove(struct iobuf_t *, size_t);
+size_t iobuf_append_remove(struct iobuf_t *from, struct iobuf_t *to);
 size_t iobuf_append(struct iobuf_t *, const void *, int);
 
 void uv_custom_poll_init(struct uv_custom_poll_t **, uv_poll_t *, void *);
@@ -198,6 +204,6 @@ int uv_custom_read(uv_poll_t *);
 int uv_custom_write(uv_poll_t *);
 int uv_custom_close(uv_poll_t *);
 
-void uv_queue_work_s(uv_work_t *req, char *name, uv_work_cb work_cb, uv_after_work_cb after_work_cb);
+void uv_queue_work_s(uv_work_t *req, char *name, int main, uv_work_cb work_cb, uv_after_work_cb after_work_cb);
 
 #endif

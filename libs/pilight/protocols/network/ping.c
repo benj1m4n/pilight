@@ -188,3 +188,6 @@ void init(void) {
 	pingInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *pping;

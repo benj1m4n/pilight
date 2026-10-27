@@ -315,3 +315,6 @@ void init(void) {
 	quiggScreenInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *quigg_screen;

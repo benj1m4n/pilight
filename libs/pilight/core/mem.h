@@ -9,10 +9,28 @@
 #ifndef _MEM_H_
 #define _MEM_H_
 
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "../backtrace/backtrace.h"
+#include "../backtrace/backtrace-supported.h"
+
 #define OUT_OF_MEMORY fprintf(stderr, "out of memory in %s #%d\n", __FILE__, __LINE__),exit(EXIT_FAILURE);
 
-int xfree(void);
-void memtrack(void);
+#ifdef __GNUC__
+	#define atomic_inc(ptr) __sync_add_and_fetch(&(ptr), 1)
+	#define atomic_dec(ptr) __sync_add_and_fetch(&(ptr), -1)
+#elif defined (_WIN32)
+	#define atomic_inc(ptr) InterlockedIncrement(&(ptr))
+	#define atomic_dec(ptr) InterlockedDecrement(&(ptr))
+#else
+	#error "Need some more porting work here"
+#endif
+
+int memanalyze(void);
+void heaptrack(void);
+
+extern struct backtrace_state *btstate;
 
 void *__malloc(unsigned long, const char *, int);
 void *__realloc(void *, unsigned long, const char *, int);
@@ -23,22 +41,18 @@ void __free(void *, const char *, int);
  */
 char *___strdup(char *, const char *, int);
 
-// #define MALLOC(a) __malloc(a, __FILE__, __LINE__)
-// #define REALLOC(a, b) __realloc(a, b, __FILE__, __LINE__)
-// #define CALLOC(a, b) __calloc(a, b, __FILE__, __LINE__)
-// #define STRDUP(a) ___strdup(a, __FILE__, __LINE__)
-// #define FREE(a) __free((void *)(a), __FILE__, __LINE__),(a)=NULL
-
-#define MALLOC malloc
-#define REALLOC realloc
-#define CALLOC calloc
-#define STRDUP strdup
-#define FREE(a) free((void *)(a)),(a)=NULL
-
-#define _MALLOC malloc
-#define _REALLOC realloc
-#define _CALLOC calloc
-#define _STRDUP strdup
-#define _FREE free
+#if defined(DEBUG) && !defined(__mips__) && !defined(__aarch64__)
+	#define MALLOC(a) __malloc(a, __FILE__, __LINE__)
+	#define REALLOC(a, b) __realloc(a, b, __FILE__, __LINE__)
+	#define CALLOC(a, b) __calloc(a, b, __FILE__, __LINE__)
+	#define STRDUP(a) ___strdup(a, __FILE__, __LINE__)
+	#define FREE(a) __free((void *)(a), __FILE__, __LINE__),(a)=NULL
+#else
+	#define MALLOC malloc
+	#define REALLOC realloc
+	#define CALLOC calloc
+	#define STRDUP strdup
+	#define FREE(a) free((void *)(a)),(a)=NULL
+#endif
 
 #endif

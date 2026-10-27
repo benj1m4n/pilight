@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8.8)
+cmake_minimum_required(VERSION 3.5)
 
 include(CMakeConfig.txt)
 
@@ -6,7 +6,9 @@ project(pilight)
 set(VERSION 8.1.5)
 
 set(MODULESPACK OFF)
-set(CMAKE_BUILD_TYPE Debug)
+if(NOT CMAKE_BUILD_TYPE MATCHES "(Release|Debug)")
+	set(CMAKE_BUILD_TYPE Release)
+endif()
 
 set(CMAKE_SKIP_RULE_DEPENDENCY TRUE)
 set(CPACK_DEB_COMPONENT_INSTALL TRUE)
@@ -48,13 +50,17 @@ if(CMAKE_BUILD_TOOL MATCHES "make")
   endif(NOT CMAKE_C_FLAGS MATCHES "-Wall")
 endif(CMAKE_BUILD_TOOL MATCHES "make")
 
-IF(CMAKE_COMPILER_IS_GNUCC)
+string(TOUPPER ${CMAKE_BUILD_TYPE} BUILD_TYPE)
+add_definitions(-D${BUILD_TYPE})
+
+IF(CMAKE_COMPILER_IS_GNUCC MATCHES "Release")
 	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O2")
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2")
-ENDIF(CMAKE_COMPILER_IS_GNUCC)
+ENDIF()
 
-set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -DDEBUG")
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DDEBUG")
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -DDEBUG -fsanitize=address -static-libasan")
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DDEBUG -fsanitize=address -static-libasan")
+
 
 if(NOT WIN32)
   string(ASCII 27 Esc)
@@ -78,9 +84,9 @@ endif()
 
 set(CMAKE_SKIP_RPATH TRUE)
 if(NOT WIN32)
-	set(CMAKE_EXE_LINKER_FLAGS "  -Wl,-rpath=.,-rpath=/usr/local/lib/,-rpath=/usr/lib/,-rpath=/lib/")
-	set(CMAKE_SHARED_LINKER_FLAGS " -Wl,-rpath=.,-rpath=/usr/local/lib/,-rpath=/usr/lib/,-rpath=/lib/")
-	set(CMAKE_MODULE_LINKER_FLAGS " -Wl,-rpath=.,-rpath=/usr/local/lib/,-rpath=/usr/lib/,-rpath=/lib/")
+	set(CMAKE_EXE_LINKER_FLAGS "-Wl,-E,-rpath=.,-rpath=/usr/local/lib/,-rpath=/usr/lib/,-rpath=/lib/")
+	set(CMAKE_SHARED_LINKER_FLAGS "-Wl,-E,-rpath=.,-rpath=/usr/local/lib/,-rpath=/usr/lib/,-rpath=/lib/")
+	set(CMAKE_MODULE_LINKER_FLAGS "-Wl,-E,-rpath=.,-rpath=/usr/local/lib/,-rpath=/usr/lib/,-rpath=/lib/")
 else()
 	set(CMAKE_EXE_LINKER_FLAGS "-static -static-libgcc")
 endif()
@@ -166,7 +172,7 @@ if(${MODULESPACK} MATCHES "ON" AND NOT WIN32)
 endif()
 
 if(NOT WIN32)
-	if(${PROTOCOL_ARPING} MATCHES "ON" AND NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^aarch64")
+	if(${PROTOCOL_ARPING} MATCHES "ON")
 		set(CMAKE_PCAP_LIBS_INIT)
 
 		find_library(CMAKE_PCAP_LIBS_INIT
@@ -176,7 +182,7 @@ if(NOT WIN32)
 				/usr/lib
 				/usr/lib32
 				/usr/lib64
-				/usr/lib/i386-linux-gnu		
+				/usr/lib/i386-linux-gnu
 				/usr/lib/x86_64-linux-gnu
 				/usr/local/lib
 				/usr/local/lib32
@@ -193,32 +199,34 @@ if(NOT WIN32)
 		endif()
 	endif()
 
-	# set(CMAKE_UNWIND_LIBS_INIT)
+	set(CMAKE_UNWIND_LIBS_INIT)
 
-	# if(NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^mips" AND NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^aarch64")
-		# find_library(CMAKE_UNWIND_LIBS_INIT
-		# NAME unwind
-		# PATHS
-			# ${CROSS_COMPILE_LIBS}
-			# /usr/lib
-			# /usr/lib32
-			# /usr/lib64
-			# /usr/lib/i386-linux-gnu
-			# /usr/lib/x86_64-linux-gnu
-			# /usr/local/lib
-			# /usr/local/lib32
-			# /usr/local/lib64
-			# /usr/lib/arm-linux-gnueabi
-			# /usr/lib/arm-linux-gnueabihf
-			# /usr/lib/aarch64-linux-gnu
-		# NO_DEFAULT_PATH)
+	if(NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^mips" AND NOT ${CMAKE_SYSTEM_PROCESSOR} MATCHES "^aarch64")
+		if(CMAKE_BUILD_TYPE MATCHES "Debug")
+			find_library(CMAKE_UNWIND_LIBS_INIT
+			NAME unwind
+			PATHS
+				${CROSS_COMPILE_LIBS}
+				/usr/lib
+				/usr/lib32
+				/usr/lib64
+				/usr/lib/i386-linux-gnu
+				/usr/lib/x86_64-linux-gnu
+				/usr/local/lib
+				/usr/local/lib32
+				/usr/local/lib64
+				/usr/lib/arm-linux-gnueabi
+				/usr/lib/arm-linux-gnueabihf
+				/usr/lib/aarch64-linux-gnu
+			NO_DEFAULT_PATH)
 
-		# if(${CMAKE_UNWIND_LIBS_INIT} MATCHES "CMAKE_UNWIND_LIBS_INIT-NOTFOUND")
-			# message(FATAL_ERROR "Looking for libunwind - not found")
-		# else()
-			# message(STATUS "Looking for libunwind - found (${CMAKE_UNWIND_LIBS_INIT})")
-		# endif()
-	# endif()
+			if(${CMAKE_UNWIND_LIBS_INIT} MATCHES "CMAKE_UNWIND_LIBS_INIT-NOTFOUND")
+				message(FATAL_ERROR "Looking for libunwind - not found")
+			else()
+				message(STATUS "Looking for libunwind - found (${CMAKE_UNWIND_LIBS_INIT})")
+			endif()
+		endif()
+	endif()
 
 	find_library(CMAKE_WIRINGX_LIBS_INIT
 		NAME wiringx
@@ -313,7 +321,66 @@ else()
 	message(STATUS "Looking for libmbedx509 - found (${CMAKE_MBEDX509_LIBS_INIT})")
 endif()
 
+function(set_lua_version_vars)
+    set(LUA_VERSIONS5 5.3 5.2 5.1 5.0)
+    set(LUAJIT_VERSIONS 2.0 2.1)
+
+    if (LuaJIT_FIND_VERSION_EXACT)
+        if (LuaJIT_FIND_VERSION_COUNT GREATER 1)
+            set(luajit_append_versions ${LuaJIT_FIND_VERSION_MAJOR}.${LuaJIT_FIND_VERSION_MINOR})
+        endif ()
+    elseif (LuaJIT_FIND_VERSION)
+        # once there is a different major version supported this should become a loop
+        if (NOT LuaJIT_FIND_VERSION_MAJOR GREATER 5)
+            if (LuaJIT_FIND_VERSION_COUNT EQUAL 1)
+                set(luajit_append_versions ${LUA_VERSIONS5})
+            else ()
+                foreach (subver IN LISTS LUA_VERSIONS5)
+                    if (NOT subver VERSION_LESS ${LuaJIT_FIND_VERSION})
+                        list(APPEND luajit_append_versions ${subver})
+                    endif ()
+                endforeach ()
+            endif ()
+        endif ()
+    else ()
+        # once there is a different major version supported this should become a loop
+        set(luajit_append_versions ${LUA_VERSIONS5})
+    endif ()
+
+    foreach (ver IN LISTS luajit_append_versions LUAJIT_VERSIONS)
+        string(REGEX MATCH "^([0-9]+)\\.([0-9]+)$" _ver "${ver}")
+        list(APPEND _luajit_include_subdirs
+             include/luajit${CMAKE_MATCH_1}${CMAKE_MATCH_2}
+             include/luajit${CMAKE_MATCH_1}.${CMAKE_MATCH_2}
+             include/luajit-${CMAKE_MATCH_1}.${CMAKE_MATCH_2}
+        )
+
+        list(APPEND _luajit_library_names
+             luajit${CMAKE_MATCH_1}${CMAKE_MATCH_2}
+             luajit${CMAKE_MATCH_1}.${CMAKE_MATCH_2}
+             luajit.${CMAKE_MATCH_1}.${CMAKE_MATCH_2}
+             luajit-${CMAKE_MATCH_1}.${CMAKE_MATCH_2}
+        )
+    endforeach ()
+
+    foreach (ver IN LISTS LUA_VERSIONS5)
+        string(REGEX MATCH "^([0-9]+)\\.([0-9]+)$" _ver "${ver}")
+        list(APPEND _luajit_library_names
+             luajit${CMAKE_MATCH_1}${CMAKE_MATCH_2}
+             luajit${CMAKE_MATCH_1}.${CMAKE_MATCH_2}
+             luajit.${CMAKE_MATCH_1}.${CMAKE_MATCH_2}
+             luajit-${CMAKE_MATCH_1}.${CMAKE_MATCH_2}
+        )
+    endforeach ()
+
+    set(_luajit_include_subdirs "${_luajit_include_subdirs}" PARENT_SCOPE)
+    set(_luajit_library_names "${_luajit_library_names}" PARENT_SCOPE)
+endfunction(set_lua_version_vars)
+
+set_lua_version_vars()
+
 if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "^aarch64")
+	find_path(CMAKE_LUA_INCLUDE_DIR luajit.h PATH_SUFFIXES ${_luajit_include_subdirs} include/luajit include PATHS /usr)
 	find_library(CMAKE_LUA_LIBS_INIT
 		NAME lua5.1
 		PATHS
@@ -337,6 +404,7 @@ if(${CMAKE_SYSTEM_PROCESSOR} MATCHES "^aarch64")
 		message(STATUS "Looking for libluajit - found (${CMAKE_LUA_LIBS_INIT})")
 	endif()
 else()
+	find_path(CMAKE_LUA_INCLUDE_DIR luajit.h PATH_SUFFIXES ${_luajit_include_subdirs} include/luajit include PATHS /usr)
 	find_library(CMAKE_LUA_LIBS_INIT
 		NAME luajit-5.1
 		PATHS
@@ -361,9 +429,11 @@ else()
 	endif()
 endif()
 
+
 include_directories(${PROJECT_SOURCE_DIR}/inc)
 include_directories(${PROJECT_SOURCE_DIR}/libs/libuv)
 include_directories(/usr/local/include/)
+include_directories(${CMAKE_LUA_INCLUDE_DIR})
 
 add_subdirectory(inc)
 add_subdirectory(libs)
@@ -454,12 +524,12 @@ if(${MODULESPACK} MATCHES "OFF" OR WIN32)
 		target_link_libraries(${PROJECT_NAME}_static ${CMAKE_PCAP_LIBS_INIT})
 	endif()
 
-	# if(NOT WIN32)
-		# target_link_libraries(${PROJECT_NAME}_shared ${CMAKE_UNWIND_LIBS_INIT})
-		# target_link_libraries(${PROJECT_NAME}_static ${CMAKE_UNWIND_LIBS_INIT})
-	# endif()
+	if(NOT WIN32 AND CMAKE_BUILD_TYPE MATCHES "Debug")
+		target_link_libraries(${PROJECT_NAME}_shared ${CMAKE_UNWIND_LIBS_INIT})
+		target_link_libraries(${PROJECT_NAME}_static ${CMAKE_UNWIND_LIBS_INIT})
+	endif()
 
-	set_target_properties(${PROJECT_NAME}_shared ${PROJECT_NAME}_static PROPERTIES OUTPUT_NAME ${PROJECT_NAME})
+	set_target_properties(${PROJECT_NAME}_shared ${PROJECT_NAME}_static PROPERTIES ENABLE_EXPORTS TRUE OUTPUT_NAME ${PROJECT_NAME})
 
 	if(NOT WIN32)
 		install(CODE "execute_process(COMMAND rm /usr/local/lib/lib${PROJECT_NAME}.so)")
@@ -491,7 +561,8 @@ if(${MODULESPACK} MATCHES "OFF" OR WIN32)
 		endif()
 
 		install(PROGRAMS ${PROJECT_SOURCE_DIR}/res/init/${PROJECT_NAME}.sysv DESTINATION /etc/init.d/ RENAME ${PROJECT_NAME})
-		install(PROGRAMS ${PROJECT_SOURCE_DIR}/res/init/${PROJECT_NAME}.systemd DESTINATION etc/systemd/system/ RENAME ${PROJECT_NAME}.service)
+		install(PROGRAMS ${PROJECT_SOURCE_DIR}/res/init/${PROJECT_NAME}.systemd DESTINATION /etc/systemd/system/ RENAME ${PROJECT_NAME}.service)
+		install(PROGRAMS ${PROJECT_SOURCE_DIR}/res/init/${PROJECT_NAME}-wait-for-route.systemd DESTINATION /etc/systemd/system/ RENAME ${PROJECT_NAME}-wait-for-route.service)
 		install(PROGRAMS ${PROJECT_SOURCE_DIR}/res/init/${PROJECT_NAME}.upstart DESTINATION /etc/init/ RENAME ${PROJECT_NAME}.conf)
 		install(FILES ${PROJECT_SOURCE_DIR}/res/config/config.json-default DESTINATION /etc/${PROJECT_NAME}/ RENAME config.json COMPONENT ${PROJECT_NAME})
 	else()

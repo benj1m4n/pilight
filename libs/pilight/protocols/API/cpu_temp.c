@@ -396,3 +396,6 @@ void init(void) {
 	cpuTempInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *cpuTemp;

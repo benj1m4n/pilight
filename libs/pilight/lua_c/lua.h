@@ -9,9 +9,11 @@
 #ifndef _LUA_H_
 #define _LUA_H_
 
-#include <luajit-2.0/lua.h>
-#include <luajit-2.0/lualib.h>
-#include <luajit-2.0/lauxlib.h>
+#include <setjmp.h>
+
+#include <lua.h>
+#include <lualib.h>
+#include <lauxlib.h>
 
 // #include "ctrace.h"
 
@@ -39,7 +41,15 @@
 #define PLUA_TUSERDATA           128
 #define PLUA_TTHREAD             256
 
+#define PLUA_TABLE   0
+#define PLUA_TIMER   1
+#define PLUA_THREAD  2
+#define PLUA_EVENT   3
+#define PLUA_MQTT    4
+
 typedef struct plua_metatable_t {
+	int type;
+
 	struct {
 		struct varcont_t val;
 		struct varcont_t key;
@@ -49,7 +59,7 @@ typedef struct plua_metatable_t {
 	int iter[NRLUASTATES];
 
 	uv_mutex_t lock;
-	uv_sem_t *ref;
+	volatile int ref;
 } plua_metatable_t;
 
 typedef struct plua_module_t {
@@ -71,7 +81,8 @@ typedef struct plua_module_t {
 
 typedef struct lua_state_t {
 	lua_State *L;
-	uv_mutex_t lock;
+	// uv_mutex_t lock;
+	volatile int claimed;
 	struct plua_module_t *module;
 	struct plua_module_t *oldmod;
 	struct plua_metatable_t *table;
@@ -80,13 +91,24 @@ typedef struct lua_state_t {
 	struct {
 		struct {
 			int free;
+			volatile int ref;
 			void *ptr;
 			void (*callback)(void *ptr);
 		} **list;
 		int nr;
 		int size;
-		uv_mutex_t lock;
+		int threadid;
+		volatile int claimed;
+//		uv_mutex_t lock;
 	} gc;
+
+	struct {
+		int set;
+		int level;
+		char *file;
+		int line;
+	} error;
+	jmp_buf jmp;
 
 	char *file;
 	int line;
@@ -95,9 +117,14 @@ typedef struct lua_state_t {
 
 #define PLUA_INTERFACE_FIELDS			\
   /* public */										\
+	int type;                       \
 	lua_State *L;										\
 	struct plua_metatable_t *table;	\
 	struct plua_module_t *module;		\
+	volatile int ref;               \
+	uv_mutex_t lock;                \
+	void (*gc)(void *data);         \
+	int sigterm;                    \
 
 typedef struct plua_interface_t {
   PLUA_INTERFACE_FIELDS
@@ -133,7 +160,11 @@ int plua_flush_coverage(void);
 int plua_namespace(struct plua_module_t *module, char *p);
 void plua_package_path(const char *path);
 void plua_override_global(char *name, int (*func)(lua_State *L));
+char *plua_interface_to_string(int i);
 int plua_gc(void);
+
+int plua_set_userdata(lua_State *L, struct plua_interface_t *interface, char *type);
+int plua_get_userdata(lua_State *L, struct plua_interface_t *interface, char *type);
 
 #define pluaL_error(a, b, ...) \
 	do { \

@@ -16,7 +16,7 @@
 struct event_function_args_t {
 	struct varcont_t var;
 	struct event_function_args_t *next;
-} event_function_args_t;
+};
 
 void event_function_init(void);
 int event_function_callback(char *, struct event_function_args_t *, struct varcont_t *v);

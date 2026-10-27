@@ -108,3 +108,6 @@ void init(void) {
 	secudoSmokeInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *secudo_smoke;

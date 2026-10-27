@@ -253,3 +253,6 @@ void init(void) {
 	arctechSwitchOldInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *arctech_switch_old;

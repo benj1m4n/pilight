@@ -232,3 +232,6 @@ void init(void) {
 	mumbiInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *mumbi;

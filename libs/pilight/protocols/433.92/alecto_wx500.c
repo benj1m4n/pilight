@@ -314,3 +314,6 @@ void init(void) {
 	alectoWX500Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *alecto_wx500;

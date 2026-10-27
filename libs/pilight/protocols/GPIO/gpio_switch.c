@@ -229,3 +229,6 @@ void init(void) {
 	gpioSwitchInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *gpio_switch;

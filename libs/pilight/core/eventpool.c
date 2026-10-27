@@ -39,6 +39,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/syscall.h>
 #include <assert.h>
 
 #include "log.h"
@@ -61,6 +62,7 @@ typedef struct eventqueue_data_t {
 } eventqueue_data_t;
 
 typedef struct thread_list_t {
+	int main;
 	char *name;
 	void *gc;
 	uv_work_t *work_req;
@@ -82,8 +84,6 @@ static uv_mutex_t listeners_lock;
 // static pthread_mutexattr_t listeners_attr;
 static int lockinit = 0;
 static int eventpoolinit = 0;
-static ssize_t zero = 0;
-static ssize_t one = 1;
 
 static struct eventpool_listener_t *eventpool_listeners = NULL;
 
@@ -129,6 +129,8 @@ static struct reasons_t {
 	{	REASON_ARP_LOST_DEVICE,				"REASON_ARP_LOST_DEVICE", 			0 },
 	{	REASON_ARP_CHANGED_DEVICE,		"REASON_ARP_CHANGED_DEVICE",		0	},
 	{	REASON_LOG,										"REASON_LOG",										0 },
+	{	REASON_MQTT_CLIENT_REMOVED,		"REASON_MQTT_CLIENT_REMOVED",		0 },
+	{	REASON_MQTT_CLIENT_TIMEOUT,		"REASON_MQTT_CLIENT_TIMEOUT",		0 },
 	{	REASON_END,										"REASON_END",										0 }
 };
 
@@ -136,38 +138,53 @@ static void safe_thread_loop(uv_async_t *handle) {
 	const uv_thread_t pth_cur_id = uv_thread_self();
 	assert(uv_thread_equal(&pth_main_id, &pth_cur_id));
 
-	uv_mutex_lock(&thread_lock);
-
 	struct thread_list_t *node = NULL;
-	node = thread_list;
-
-	if(node != NULL) {
-		uv_queue_work(uv_default_loop(), node->work_req, node->name, node->work_cb, node->after_work_cb);
+	uv_mutex_lock(&thread_lock);
+	if(thread_list != NULL) {
+		node = thread_list;
 
 		thread_list = thread_list->next;
+
+		if(thread_list != NULL && !uv_is_closing((uv_handle_t *)thread_async_req)) {
+			uv_async_send(thread_async_req);
+		}
+	} else {
+		uv_mutex_unlock(&thread_lock);
+		return;
+	}
+
+	uv_mutex_unlock(&thread_lock);
+
+	if(node != NULL) {
+		if(node->main == 1) {
+			node->work_cb(node->work_req);
+			node->after_work_cb(node->work_req, 0);
+		} else {
+			uv_queue_work(uv_default_loop(), node->work_req, node->name, node->work_cb, node->after_work_cb);
+		}
 		FREE(node);
 	}
-
-	if(thread_list != NULL) {
-		uv_async_send(thread_async_req);
-	}
-	uv_mutex_unlock(&thread_lock);
 }
 
-void uv_queue_work_s(uv_work_t *req, char *name, uv_work_cb work_cb, uv_after_work_cb after_work_cb) {
-	uv_mutex_lock(&thread_lock);
-
+void uv_queue_work_s(uv_work_t *req, char *name, int main, uv_work_cb work_cb, uv_after_work_cb after_work_cb) {
 	struct thread_list_t *node = MALLOC(sizeof(struct thread_list_t));
 	node->name = name;
 	node->work_cb = work_cb;
 	node->work_req = req;
 	node->after_work_cb = after_work_cb;
+	node->main = main;
+
+	uv_mutex_lock(&thread_lock);
+
 	node->next = thread_list;
 	thread_list = node;
 
-	uv_async_send(thread_async_req);
-
 	uv_mutex_unlock(&thread_lock);
+
+	if(!uv_is_closing((uv_handle_t *)thread_async_req)) {
+		uv_async_send(thread_async_req);
+	}
+
 }
 
 static void fib_free(uv_work_t *req, int status) {
@@ -299,16 +316,16 @@ void eventpool_trigger(int reason, void *(*done)(void *), void *data) {
 		eventqueue = node;
 	}
 
-	/*
-	 * If the eventqueue size is above
-	 * 50 entries then there must be a bug
-	 * at the trigger side.
-	 */
-	assert(eventqueue_size < 50);
-
-	uv_mutex_unlock(&listeners_lock);
+	// /*
+	 // * If the eventqueue size is above
+	 // * 50 entries then there must be a bug
+	 // * at the trigger side.
+	 // */
+	// assert(eventqueue_size < 50);
 
 	uv_async_send(async_event_req);
+
+	uv_mutex_unlock(&listeners_lock);
 }
 
 static void eventpool_execute(uv_async_t *handle) {
@@ -397,13 +414,14 @@ static void eventpool_execute(uv_async_t *handle) {
 			struct eventqueue_data_t *data = node[i]->userdata;
 			if(threads == EVENTPOOL_NO_THREADS) {
 				nrlisteners1[node[i]->reason]++;
+#ifdef _WIN32
+				int nr = InterlockedExchangeAdd(&nrlisteners[node[i]->reason]);
+#else
+				int nr = __sync_add_and_fetch(&nrlisteners[node[i]->reason], 0);
+#endif
 				node[i]->func(node[i]->reason, data->data, data->userdata);
 
-#ifdef _WIN32
-				if(nrlisteners1[node[i]->reason] == InterlockedExchangeAdd(&nrlisteners[node[i]->reason], 0)) {
-#else
-				if(nrlisteners1[node[i]->reason] == __sync_add_and_fetch(&nrlisteners[node[i]->reason], 0)) {
-#endif
+				if(nrlisteners1[node[i]->reason] == nr) {
 					if(node[i]->done != NULL) {
 						node[i]->done((void *)data->data);
 					}
@@ -490,28 +508,23 @@ int eventpool_gc(void) {
 		uv_mutex_unlock(&listeners_lock);
 	}
 
-	uv_mutex_lock(&thread_lock);
 	struct thread_list_t *node = NULL;
-	while(thread_list) {
+	while(1) {
+		uv_mutex_lock(&thread_lock);
 		node = thread_list;
+		if(node == NULL) {
+			uv_mutex_unlock(&thread_lock);
+			break;
+		}
 		thread_list = thread_list->next;
+		uv_mutex_unlock(&thread_lock);
+
 		node->after_work_cb(node->work_req, -99);
 		FREE(node);
 	}
-	uv_mutex_unlock(&thread_lock);
 
 	eventpoolinit = 0;
 	return 0;
-}
-
-void iobuf_remove(struct iobuf_t *io, size_t n) {
-	uv_mutex_lock(&io->lock);
-  if(n > 0 && n <= io->len) {
-    memmove(io->buf, io->buf + n, io->len - n);
-    io->len -= n;
-		io->buf[io->len] = 0;
-  }
-	uv_mutex_unlock(&io->lock);
 }
 
 static void eventpool_update_poll(uv_poll_t *req) {
@@ -520,9 +533,15 @@ static void eventpool_update_poll(uv_poll_t *req) {
 	int action = 0, r = 0;
 
 	custom_poll_data = req->data;
-	if(custom_poll_data == NULL || uv_is_closing((uv_handle_t *)req)) {
+	if(custom_poll_data == NULL) {
 		return;
 	}
+
+	if(uv_is_closing((uv_handle_t *)req)) {
+		return;
+	}
+
+	assert(custom_poll_data->threadid == syscall(__NR_gettid));
 
 	send_io = &custom_poll_data->send_iobuf;
 
@@ -554,6 +573,65 @@ static void eventpool_update_poll(uv_poll_t *req) {
 	}
 }
 
+void iobuf_init(struct iobuf_t *iobuf, size_t initial_size) {
+	iobuf->len = iobuf->size = 0;
+	iobuf->buf = NULL;
+	uv_mutex_init(&iobuf->lock);
+}
+
+void iobuf_remove(struct iobuf_t *io, size_t n) {
+	uv_mutex_lock(&io->lock);
+  if(n > 0 && n <= io->len) {
+    memmove(io->buf, io->buf + n, io->len - n);
+    io->len -= n;
+		if(io->len == 0) {
+			FREE(io->buf);
+			io->buf = NULL;
+		} else {
+			io->buf = REALLOC(io->buf, io->len + 1);
+			io->buf[io->len] = 0;
+		}
+		io->size = io->len;
+  }
+	uv_mutex_unlock(&io->lock);
+}
+
+size_t iobuf_append_remove(struct iobuf_t *a, struct iobuf_t *b) {
+	char *p = NULL;
+	size_t i = -1;
+
+	uv_mutex_lock(&b->lock);
+	uv_mutex_lock(&a->lock);
+	i = a->len;
+
+	assert(b != NULL);
+	assert(b->len <= b->size);
+
+	if(a->len <= 0) {
+	} else if(b->len + a->len <= b->size) {
+		memcpy(b->buf + b->len, a->buf, a->len);
+		b->len += a->len;
+	} else if((p = REALLOC(b->buf, b->len + a->len + 1)) != NULL) {
+		b->buf = p;
+		memset(&b->buf[b->len], 0, b->len + a->len);
+		memcpy(b->buf + b->len, a->buf, a->len);
+		b->len += a->len;
+		b->size = b->len;
+	}
+
+	if(i > 0) {
+		if(a->buf != NULL) {
+			FREE(a->buf);
+		}
+		a->len = a->size = 0;
+	}
+
+	uv_mutex_unlock(&a->lock);
+	uv_mutex_unlock(&b->lock);
+
+	return i;
+}
+
 size_t iobuf_append(struct iobuf_t *io, const void *buf, int len) {
   char *p = NULL;
 
@@ -567,6 +645,7 @@ size_t iobuf_append(struct iobuf_t *io, const void *buf, int len) {
     io->len += len;
   } else if((p = REALLOC(io->buf, io->len + len + 1)) != NULL) {
     io->buf = p;
+		memset(&io->buf[io->len], 0, len + 1);
     memcpy(io->buf + io->len, buf, len);
     io->len += len;
     io->size = io->len;
@@ -589,14 +668,14 @@ void uv_custom_poll_cb(uv_poll_t *req, int status, int events) {
 	 * Make sure we execute in the main thread
 	 */
 	const uv_thread_t pth_cur_id = uv_thread_self();
-	assert(uv_thread_equal(&pth_main_id, &pth_cur_id));	
+	assert(uv_thread_equal(&pth_main_id, &pth_cur_id));
 
 	struct uv_custom_poll_t *custom_poll_data = NULL;
 	struct iobuf_t *send_io = NULL;
 	char buffer[BUFFER_SIZE];
 	uv_os_fd_t fd = 0;
 	long int fromlen = 0;
-	int r = 0, n = 0;
+	int r = 0, n = 0, err = 0;
 
 	custom_poll_data = req->data;
 	if(custom_poll_data == NULL) {
@@ -608,23 +687,15 @@ void uv_custom_poll_cb(uv_poll_t *req, int status, int events) {
 	 * Status == -9: Socket is unreachable
 	 * Events == 0: Client-end got disconnected
 	 */
-	r = uv_fileno((uv_handle_t *)req, &fd);
 	if(status < 0 || events == 0) {
 		if(status == -9) {
 			logprintf(LOG_ERR, "uv_custom_poll_cb: socket not responding");
 		} else {
 			logprintf(LOG_ERR, "uv_custom_poll_cb: %s", uv_strerror(status));
 		}
-		if(custom_poll_data->close_cb != NULL) {
-			custom_poll_data->close_cb(req);
-		}
-		if(!uv_is_closing((uv_handle_t *)req)) {
-			uv_poll_stop(req);
-		}
-		if(fd > 0) {
-			close(fd);
-		}
-		return;
+		custom_poll_data->doclose = 1;
+		custom_poll_data->doread = 0;
+		// goto end;
 	}
 
 	custom_poll_data->started = 1;
@@ -703,19 +774,19 @@ void uv_custom_poll_cb(uv_poll_t *req, int status, int events) {
 		if(send_io->len > 0) {
 			if(custom_poll_data->is_ssl == 1) {
 				n = mbedtls_ssl_write(&custom_poll_data->ssl.ctx, (unsigned char *)send_io->buf, send_io->len);
-					if(n == MBEDTLS_ERR_SSL_WANT_READ) {
-						/*LCOV_EXCL_START*/
-						custom_poll_data->doread = 1;
-						custom_poll_data->dowrite = 0;
-						goto end;
-						/*LCOV_EXCL_STOP*/
-					} else if(n == MBEDTLS_ERR_SSL_WANT_WRITE) {
-						/*LCOV_EXCL_START*/
-						custom_poll_data->dowrite = 1;
-						custom_poll_data->doread = 0;
-						goto end;
-						/*LCOV_EXCL_STOP*/
-					}
+				if(n == MBEDTLS_ERR_SSL_WANT_READ) {
+					/*LCOV_EXCL_START*/
+					custom_poll_data->doread = 1;
+					custom_poll_data->dowrite = 0;
+					goto end;
+					/*LCOV_EXCL_STOP*/
+				} else if(n == MBEDTLS_ERR_SSL_WANT_WRITE) {
+					/*LCOV_EXCL_START*/
+					custom_poll_data->dowrite = 1;
+					custom_poll_data->doread = 0;
+					goto end;
+					/*LCOV_EXCL_STOP*/
+				}
 				if(n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE) {
 				} else if(n < 0) {
 					/*LCOV_EXCL_START*/
@@ -726,7 +797,8 @@ void uv_custom_poll_cb(uv_poll_t *req, int status, int events) {
 					/*LCOV_EXCL_STOP*/
 				}
 			} else {
-				n = (int)send((unsigned int)fd, send_io->buf, send_io->len, 0);
+				n = (int)send((unsigned int)fd, send_io->buf, send_io->len, MSG_NOSIGNAL);
+				err = errno;
 			}
 			if(n > 0) {
 				iobuf_remove(send_io, n);
@@ -745,8 +817,8 @@ void uv_custom_poll_cb(uv_poll_t *req, int status, int events) {
 					}
 				}
 			} else if(n == 0) {
-			} else if(custom_poll_data->is_ssl == 0 && n < 0 && errno != EAGAIN && errno != EINTR) {
-				if(errno == ECONNRESET) {
+			} else if(custom_poll_data->is_ssl == 0 && n < 0 && err != EAGAIN && err != EINTR) {
+				if(err == ECONNRESET) {
 					uv_poll_stop(req);
 					return;
 				} else {
@@ -788,7 +860,11 @@ void uv_custom_poll_cb(uv_poll_t *req, int status, int events) {
 			} else if(n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
 				custom_poll_data->doread = 0;
 				if(custom_poll_data->read_cb != NULL) {
-					custom_poll_data->read_cb(req, &custom_poll_data->recv_iobuf.len, custom_poll_data->recv_iobuf.buf);
+					ssize_t len = 0;
+					len = custom_poll_data->read_cb(req, custom_poll_data->recv_iobuf.len, (const char *)custom_poll_data->recv_iobuf.buf);
+					if(!uv_is_closing((uv_handle_t *)req)) {
+						iobuf_remove(&custom_poll_data->recv_iobuf, len);
+					}
 				}
 			}
 			if(n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE) {
@@ -798,8 +874,7 @@ void uv_custom_poll_cb(uv_poll_t *req, int status, int events) {
 					 * FIXME: New client not yet accepted
 					 */
 					if(custom_poll_data->read_cb != NULL) {
-						one = 1;
-						custom_poll_data->read_cb(req, &one, NULL);
+						custom_poll_data->read_cb(req, 1, NULL);
 					}
 				} else if(n != MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
 					mbedtls_strerror(n, (char *)&buffer, BUFFER_SIZE);
@@ -812,12 +887,14 @@ void uv_custom_poll_cb(uv_poll_t *req, int status, int events) {
 			if(custom_poll_data->custom_recv == 0) {
 				if(custom_poll_data->is_udp == 1) {
 					n = (int)recv((unsigned int)fd, buffer, BUFFER_SIZE, 0);
+					err = errno;
 				} else {
 #ifdef _WIN32
 					n = recvfrom((SOCKET)fd, buffer, BUFFER_SIZE, 0, NULL, (socklen_t *)&fromlen);
 #else
 					n = recvfrom(fd, buffer, BUFFER_SIZE, 0, NULL, (socklen_t *)&fromlen);
 #endif
+					err = errno;
 				}
 			}
 		}
@@ -827,24 +904,27 @@ void uv_custom_poll_cb(uv_poll_t *req, int status, int events) {
 				iobuf_append(&custom_poll_data->recv_iobuf, buffer, n);
 				custom_poll_data->doread = 0;
 				if(custom_poll_data->read_cb != NULL) {
-					custom_poll_data->read_cb(req, &custom_poll_data->recv_iobuf.len, custom_poll_data->recv_iobuf.buf);
+					ssize_t len = 0;
+					len = custom_poll_data->read_cb(req, custom_poll_data->recv_iobuf.len, custom_poll_data->recv_iobuf.buf);
+					if(!uv_is_closing((uv_handle_t *)req)) {
+						iobuf_remove(&custom_poll_data->recv_iobuf, len);
+					}
 				}
-			} else if(n < 0 && errno != EINTR) {
+			} else if(n < 0 && err != EINTR) {
 #ifdef _WIN32
 				switch(WSAGetLastError()) {
 					case WSAENOTCONN:
 						if(custom_poll_data->read_cb != NULL) {
 							one = 1;
-							custom_poll_data->read_cb(req, &one, NULL);
+							custom_poll_data->read_cb(req, 1, NULL);
 						}
 					break;
 					case WSAEWOULDBLOCK:
 #else
-				switch(errno) {
+				switch(err) {
 					case ENOTCONN:
 						if(custom_poll_data->read_cb != NULL) {
-							one = 1;
-							custom_poll_data->read_cb(req, &one, NULL);
+							custom_poll_data->read_cb(req, 1, NULL);
 						}
 					break;
 #if defined EAGAIN
@@ -862,7 +942,7 @@ void uv_custom_poll_cb(uv_poll_t *req, int status, int events) {
 			/*
 			 * Client was disconnected
 			 */
-			} else if(n == 0) {
+			} else if(n == 0 || (n < 0 && err == EPIPE)) {
 				custom_poll_data->doclose = 1;
 				custom_poll_data->doread = 0;
 				goto end;
@@ -870,8 +950,7 @@ void uv_custom_poll_cb(uv_poll_t *req, int status, int events) {
 		} else {
 			custom_poll_data->doread = 0;
 			if(custom_poll_data->read_cb != NULL) {
-				zero = 0;
-				custom_poll_data->read_cb(req, &zero, NULL);
+				custom_poll_data->read_cb(req, 0, NULL);
 			}
 		}
 	}
@@ -880,7 +959,7 @@ end:
 	eventpool_update_poll(req);
 }
 
-static void iobuf_free(struct iobuf_t *iobuf) {
+void iobuf_free(struct iobuf_t *iobuf) {
   if(iobuf != NULL) {
 		uv_mutex_lock(&iobuf->lock);
     if(iobuf->buf != NULL) {
@@ -892,6 +971,8 @@ static void iobuf_free(struct iobuf_t *iobuf) {
 }
 
 void uv_custom_poll_free(struct uv_custom_poll_t *data) {
+	assert(data->threadid == syscall(__NR_gettid));
+
 	if(data->is_ssl == 1) {
 		mbedtls_ssl_free(&data->ssl.ctx);
 	}
@@ -908,20 +989,16 @@ void uv_custom_poll_free(struct uv_custom_poll_t *data) {
 	FREE(data);
 }
 
-static void iobuf_init(struct iobuf_t *iobuf, size_t initial_size) {
-  iobuf->len = iobuf->size = 0;
-  iobuf->buf = NULL;
-	uv_mutex_init(&iobuf->lock);
-}
-
 void uv_custom_poll_init(struct uv_custom_poll_t **custom_poll, uv_poll_t *poll, void *data) {
 	if((*custom_poll = MALLOC(sizeof(struct uv_custom_poll_t))) == NULL) {
 		OUT_OF_MEMORY /*LCOV_EXCL_LINE*/
 	}
 	memset(*custom_poll, '\0', sizeof(struct uv_custom_poll_t));
 	iobuf_init(&(*custom_poll)->send_iobuf, 0);
-	iobuf_init(&(*custom_poll)->recv_iobuf, 0);	
-	
+	iobuf_init(&(*custom_poll)->recv_iobuf, 0);
+
+	(*custom_poll)->threadid = syscall(__NR_gettid);
+
 	poll->data = *custom_poll;
 	(*custom_poll)->data = data;
 }
@@ -929,6 +1006,8 @@ void uv_custom_poll_init(struct uv_custom_poll_t **custom_poll, uv_poll_t *poll,
 int uv_custom_close(uv_poll_t *req) {
 	struct uv_custom_poll_t *custom_poll_data = req->data;
 	struct iobuf_t *send_io = NULL;
+
+	assert(custom_poll_data->threadid == syscall(__NR_gettid));
 
 	if(uv_is_closing((uv_handle_t *)req)) {
 		return -1;
@@ -958,6 +1037,8 @@ int uv_custom_close(uv_poll_t *req) {
 int uv_custom_read(uv_poll_t *req) {
 	struct uv_custom_poll_t *custom_poll_data = req->data;
 
+	assert(custom_poll_data->threadid == syscall(__NR_gettid));
+
 	if(uv_is_closing((uv_handle_t *)req)) {
 		return -1;
 	}
@@ -974,6 +1055,8 @@ int uv_custom_read(uv_poll_t *req) {
 
 int uv_custom_write(uv_poll_t *req) {
 	struct uv_custom_poll_t *custom_poll_data = req->data;
+
+	assert(custom_poll_data->threadid == syscall(__NR_gettid));
 
 	if(uv_is_closing((uv_handle_t *)req)) {
 		return -1;

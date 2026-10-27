@@ -256,3 +256,6 @@ void init(void) {
 	lm75Init();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *lm75;

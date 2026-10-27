@@ -107,3 +107,6 @@ void init(void) {
 	genericLabelInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *generic_label;

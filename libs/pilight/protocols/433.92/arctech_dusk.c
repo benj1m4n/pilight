@@ -123,3 +123,6 @@ void init(void) {
 	arctechDuskInit();
 }
 #endif
+
+/* single definitions (previously tentative definitions in the header) */
+struct protocol_t *arctech_dusk;
