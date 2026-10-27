@@ -1,0 +1,191 @@
+From a08ce2a35e44642854d9bbf9024c2537b3958f5a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 13 Oct 2026 23:32:49 +0200
+Subject: [PATCH] broadcom2711: account for the current sysfs GPIO chip base
+ offset
+
+Same issue and fix as for broadcom2836 (#132), now for the Raspberry Pi 4:
+current kernels register pinctrl-bcm2711 at sysfs GPIO base 512, so
+exporting the raw BCM pin number fails and interrupts (receive) break.
+The base is detected at runtime (falls back to 0 for older kernels) and
+only applied to the sysfs numbers, not to register access.
+
+Also: check mmap() against MAP_FAILED and enlarge the export/unexport
+buffer so GPIO numbers with more than three digits are not truncated.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/soc/broadcom/2711.c | 73 ++++++++++++++++++++++++++++++++++++-----
+ src/soc/soc.c           |  8 ++---
+ 2 files changed, 69 insertions(+), 12 deletions(-)
+
+diff --git a/src/soc/broadcom/2711.c b/src/soc/broadcom/2711.c
+index c12daac..b4da749 100644
+--- a/src/soc/broadcom/2711.c
++++ b/src/soc/broadcom/2711.c
+@@ -14,6 +14,8 @@
+ #include <string.h>
+ #include <stdlib.h>
+ #include <ctype.h>
++#include <dirent.h>
++#include <limits.h>
+ 
+ #include "2711.h"
+ #include "../../wiringx.h"
+@@ -125,17 +127,72 @@ static struct layout_t {
+ 	{ "FSEL53", 0, { GPFSEL5, 9 }, { GPSET1, 21 }, { GPCLR1, 21 }, { GPLEV1, 21 }, FUNCTION_DIGITAL, PINMODE_NOT_SET, 0 },
+ };
+ 
++/*
++ * Current Raspberry Pi kernels register the on-board pin controller
++ * (pinctrl-bcm2711) at sysfs GPIO base 512 instead of 0, older ones at 0.
++ * The sysfs paths used for interrupts need that base added to the BCM pin
++ * number; register access and layout[] indexing must NOT be offset.
++ * Same approach as the broadcom2836 fix (#132), detected at runtime.
++ */
++static int gpioSysfsBase = 0;
++
++static int broadcom2711GetSysfsGpioBase(void) {
++	DIR *dir = NULL;
++	struct dirent *entry = NULL;
++	char path[PATH_MAX], buf[64];
++	int fd = 0, n = 0, base = 0;
++
++	if((dir = opendir("/sys/class/gpio")) == NULL) {
++		return 0;
++	}
++
++	while((entry = readdir(dir)) != NULL) {
++		if(strncmp(entry->d_name, "gpiochip", 8) != 0) {
++			continue;
++		}
++
++		snprintf(path, PATH_MAX, "/sys/class/gpio/%s/label", entry->d_name);
++		if((fd = open(path, O_RDONLY)) == -1) {
++			continue;
++		}
++		memset(buf, 0, sizeof(buf));
++		n = read(fd, buf, sizeof(buf)-1);
++		close(fd);
++		if(n <= 0 || (strncmp(buf, "pinctrl-bcm2711", 15) != 0 && strncmp(buf, "pinctrl-bcm2835", 15) != 0)) {
++			continue;
++		}
++
++		snprintf(path, PATH_MAX, "/sys/class/gpio/%s/base", entry->d_name);
++		if((fd = open(path, O_RDONLY)) == -1) {
++			continue;
++		}
++		memset(buf, 0, sizeof(buf));
++		n = read(fd, buf, sizeof(buf)-1);
++		close(fd);
++		if(n > 0) {
++			base = atoi(buf);
++		}
++		break;
++	}
++
++	closedir(dir);
++	return base;
++}
++
+ static int broadcom2711Setup(void) {
+ 	if((broadcom2711->fd = open("/dev/mem", O_RDWR | O_SYNC )) < 0) {
+ 		wiringXLog(LOG_ERR, "wiringX failed to open /dev/mem for raw memory access");
+ 		return -1;
+ 	}
+ 
+-	if((broadcom2711->gpio[0] = (unsigned char *)mmap(0, broadcom2711->page_size, PROT_READ|PROT_WRITE, MAP_SHARED, broadcom2711->fd, broadcom2711->base_addr[0])) == NULL) {
++	if((broadcom2711->gpio[0] = (unsigned char *)mmap(0, broadcom2711->page_size, PROT_READ|PROT_WRITE, MAP_SHARED, broadcom2711->fd, broadcom2711->base_addr[0])) == MAP_FAILED) {
++		broadcom2711->gpio[0] = NULL;
+ 		wiringXLog(LOG_ERR, "wiringX failed to map the %s %s GPIO memory address", broadcom2711->brand, broadcom2711->chip);
+ 		return -1;
+ 	}
+ 
++	gpioSysfsBase = broadcom2711GetSysfsGpioBase();
++
+ 	return 0;
+ }
+ 
+@@ -256,25 +313,25 @@ static int broadcom2711ISR(int i, enum isr_mode_t mode) {
+ 
+ 	pin = &broadcom2711->layout[broadcom2711->irq[i]];
+ 
+-	sprintf(path, "/sys/class/gpio/gpio%d", broadcom2711->irq[i]);
++	sprintf(path, "/sys/class/gpio/gpio%d", (broadcom2711->irq[i] + gpioSysfsBase));
+ 	if((soc_sysfs_check_gpio(broadcom2711, path)) == -1) {
+ 		sprintf(path, "/sys/class/gpio/export");
+-		if(soc_sysfs_gpio_export(broadcom2711, path, broadcom2711->irq[i]) == -1) {
++		if(soc_sysfs_gpio_export(broadcom2711, path, (broadcom2711->irq[i] + gpioSysfsBase)) == -1) {
+ 			return -1;
+ 		}
+ 	}
+ 
+-	sprintf(path, "/sys/class/gpio/gpio%d/direction", broadcom2711->irq[i]);
++	sprintf(path, "/sys/class/gpio/gpio%d/direction", (broadcom2711->irq[i] + gpioSysfsBase));
+ 	if(soc_sysfs_set_gpio_direction(broadcom2711, path, "in") == -1) {
+ 		return -1;
+ 	}
+ 
+-	sprintf(path, "/sys/class/gpio/gpio%d/edge", broadcom2711->irq[i]);
++	sprintf(path, "/sys/class/gpio/gpio%d/edge", (broadcom2711->irq[i] + gpioSysfsBase));
+ 	if(soc_sysfs_set_gpio_interrupt_mode(broadcom2711, path, mode) == -1) {
+ 		return -1;
+ 	}
+ 
+-	sprintf(path, "/sys/class/gpio/gpio%d/value", broadcom2711->irq[i]);
++	sprintf(path, "/sys/class/gpio/gpio%d/value", (broadcom2711->irq[i] + gpioSysfsBase));
+ 	if((pin->fd = soc_sysfs_gpio_reset_value(broadcom2711, path)) == -1) {
+ 		return -1;
+ 	}
+@@ -309,10 +366,10 @@ static int broadcom2711GC(void) {
+ 			if(pin->mode == PINMODE_OUTPUT) {
+ 				pinMode(i, PINMODE_INPUT);
+ 			} else if(pin->mode == PINMODE_INTERRUPT) {
+-				sprintf(path, "/sys/class/gpio/gpio%d", broadcom2711->irq[i]);
++				sprintf(path, "/sys/class/gpio/gpio%d", (broadcom2711->irq[i] + gpioSysfsBase));
+ 				if((soc_sysfs_check_gpio(broadcom2711, path)) == 0) {
+ 					sprintf(path, "/sys/class/gpio/unexport");
+-					soc_sysfs_gpio_unexport(broadcom2711, path, broadcom2711->irq[i]);
++					soc_sysfs_gpio_unexport(broadcom2711, path, (broadcom2711->irq[i] + gpioSysfsBase));
+ 				}
+ 			}
+ 			if(pin->fd > 0) {
+diff --git a/src/soc/soc.c b/src/soc/soc.c
+index 40d71d1..15b66cd 100644
+--- a/src/soc/soc.c
++++ b/src/soc/soc.c
+@@ -98,13 +98,13 @@ int soc_sysfs_check_gpio(struct soc_t *soc, char *path) {
+ }
+ 
+ int soc_sysfs_gpio_export(struct soc_t *soc, char *path, int pin) {
+-	char out[4];
++	char out[16];
+ 	int fd = 0;
+ 	if((fd = open(path, O_WRONLY)) <= 0) {
+ 		wiringXLog(LOG_ERR, "The %s %s cannot open %s for gpio exporting (%s)", soc->brand, soc->chip, path, strerror(errno));
+ 		return -1;
+ 	}
+-	int l = snprintf(out, 4, "%d", pin);
++	int l = snprintf(out, sizeof(out), "%d", pin);
+ 	if(write(fd, out, l) != l) {
+ 		wiringXLog(LOG_ERR, "The %s %s failed to write to %s for gpio exporting (%s)", soc->brand, soc->chip, path, strerror(errno));
+ 		close(fd);
+@@ -115,13 +115,13 @@ int soc_sysfs_gpio_export(struct soc_t *soc, char *path, int pin) {
+ }
+ 
+ int soc_sysfs_gpio_unexport(struct soc_t *soc, char *path, int pin) {
+-	char out[4];
++	char out[16];
+ 	int fd = 0;
+ 	if((fd = open(path, O_WRONLY)) <= 0) {
+ 		wiringXLog(LOG_ERR, "The %s %s cannot open %s for gpio unexporting (%s)", soc->brand, soc->chip, path, strerror(errno));
+ 		return -1;
+ 	}
+-	int l = snprintf(out, 4, "%d", pin);
++	int l = snprintf(out, sizeof(out), "%d", pin);
+ 	if(write(fd, out, l) != l) {
+ 		wiringXLog(LOG_ERR, "The %s %s failed to write to %s for gpio unexporting (%s)", soc->brand, soc->chip, path, strerror(errno));
+ 		close(fd);
+-- 
+2.43.0
+
